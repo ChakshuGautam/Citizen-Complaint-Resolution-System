@@ -52,7 +52,7 @@ const PGRSearchInboxConfig = () => {
                     defaultValues: {
                         complaintNumber: "",
                         mobileNumber: "",
-                        range:null
+                        range: null
 
                     },
                     fields: [
@@ -73,9 +73,10 @@ const PGRSearchInboxConfig = () => {
                             isMandatory: false,
                             disable: false,
                             populators: {
+                                // prefix:"+922",
                                 name: "mobileNumber",
-                                error: `PROJECT_PATTERN_ERR_MSG`,
-                                validation: { pattern: "^\+?[1-9]\d{0,2}[-.\s]?\(?\d{1,4}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}$", minlength: 2 }
+                                // error: `PROJECT_PATTERN_ERR_MSG`,
+                                // validation: { pattern: "^\+?[1-9]\d{0,2}[-.\s]?\(?\d{1,4}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}$", minlength: 2 }
                             },
                         },
                         {
@@ -138,7 +139,7 @@ const PGRSearchInboxConfig = () => {
                     links: [
                         {
                             text: "ES_PGR_NEW_COMPLAINT",
-                            url: "/employee/pgr/create-complaint",
+                            url: "/employee/pgr/complaint/create",
                             roles: ["SUPERUSER", "PGR-ADMIN", "PGR_ADMIN", "HELPDESK_USER"],
                             hyperlink: true,
                         },
@@ -168,7 +169,7 @@ const PGRSearchInboxConfig = () => {
                         },
                         status: null,
                         complaintType: null,
-                        serviceCode:null,
+                        serviceCode: null,
 
                     },
                     fields: [
