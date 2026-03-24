@@ -1,0 +1,56 @@
+# JDK 21 rebase for egov-user (Spring Boot 1.5 / JDK 8).
+# Unlike the Spring Boot 3.2 services, egov-user needs:
+#   1. JAXB API + runtime jars injected (removed from JDK 11+)
+#   2. --add-opens flags for JDK module access
+# The jar file is named application.jar (not *.jar pattern).
+ARG SOURCE_IMAGE=egovio/egov-user:master-fa75ba8
+FROM ${SOURCE_IMAGE} AS source
+
+FROM eclipse-temurin:21-jdk-alpine AS builder
+RUN apk add --no-cache curl
+
+WORKDIR /build
+COPY --from=source /opt/egov/application.jar /build/app.jar
+
+# Download JAXB API + implementation (removed from JDK 11+, needed by spring-security-oauth2)
+RUN curl -sL -o jaxb-api.jar https://repo1.maven.org/maven2/javax/xml/bind/jaxb-api/2.3.1/jaxb-api-2.3.1.jar && \
+    curl -sL -o javax.activation.jar https://repo1.maven.org/maven2/javax/activation/javax.activation-api/1.2.0/javax.activation-api-1.2.0.jar && \
+    curl -sL -o jaxb-runtime.jar https://repo1.maven.org/maven2/org/glassfish/jaxb/jaxb-runtime/2.3.9/jaxb-runtime-2.3.9.jar && \
+    curl -sL -o txw2.jar https://repo1.maven.org/maven2/org/glassfish/jaxb/txw2/2.3.9/txw2-2.3.9.jar && \
+    curl -sL -o istack-commons-runtime.jar https://repo1.maven.org/maven2/com/sun/istack/istack-commons-runtime/3.0.12/istack-commons-runtime-3.0.12.jar && \
+    curl -sL -o stax-ex.jar https://repo1.maven.org/maven2/org/jvnet/staxex/stax-ex/1.8.1/stax-ex-1.8.1.jar
+
+# Inject JAXB jars into the fat JAR (jar uf0 preserves STORED entries)
+RUN mkdir -p BOOT-INF/lib && \
+    cp jaxb-api.jar javax.activation.jar jaxb-runtime.jar txw2.jar istack-commons-runtime.jar stax-ex.jar BOOT-INF/lib/ && \
+    jar uf0 app.jar \
+      BOOT-INF/lib/jaxb-api.jar \
+      BOOT-INF/lib/javax.activation.jar \
+      BOOT-INF/lib/jaxb-runtime.jar \
+      BOOT-INF/lib/txw2.jar \
+      BOOT-INF/lib/istack-commons-runtime.jar \
+      BOOT-INF/lib/stax-ex.jar
+
+FROM eclipse-temurin:21-jre-alpine
+RUN mkdir -p /opt/egov
+COPY --from=builder /build/app.jar /opt/egov/app.jar
+COPY start-egov-user.sh /opt/egov/start.sh
+RUN chmod +x /opt/egov/start.sh
+
+# CDS pre-dump
+RUN timeout 30 java \
+      --add-opens java.base/java.lang=ALL-UNNAMED \
+      --add-opens java.base/java.lang.reflect=ALL-UNNAMED \
+      --add-opens java.base/java.util=ALL-UNNAMED \
+      -XX:DumpLoadedClassList=/opt/egov/app.classlist \
+      -jar /opt/egov/app.jar 2>/dev/null; true
+RUN java \
+      --add-opens java.base/java.lang=ALL-UNNAMED \
+      --add-opens java.base/java.lang.reflect=ALL-UNNAMED \
+      --add-opens java.base/java.util=ALL-UNNAMED \
+      -Xshare:dump \
+      -XX:SharedClassListFile=/opt/egov/app.classlist \
+      -XX:SharedArchiveFile=/opt/egov/app-cds.jsa \
+      -jar /opt/egov/app.jar 2>/dev/null; true
+
+CMD ["/opt/egov/start.sh"]
