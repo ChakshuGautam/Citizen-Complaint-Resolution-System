@@ -1,4 +1,6 @@
 import { Loader } from "@egovernments/digit-ui-react-components";
+console.log('Check CMS');
+console.log('Loaded');
 import React, { useState } from "react";
 import { useRouteMatch } from "react-router-dom";
 import { default as EmployeeApp } from "./pages/employee";
@@ -24,9 +26,7 @@ import SelectAddress from "../../pgr/src/pages/citizen/Create/Steps/SelectAddres
 import SelectImages from "../../pgr/src/pages/citizen/Create/Steps/SelectImages";
 import CreatePGRFlow from "./pages/citizen/Create/FormExplorer";
 
-
 export const PGRReducers = getRootReducer;
-
 
 export const PGRModule = ({ stateCode, userType, tenants }) => {
   const { path, url } = useRouteMatch();
@@ -66,6 +66,8 @@ export const PGRModule = ({ stateCode, userType, tenants }) => {
   }
 };
 
+// Added new component to render links on citizen home page for PGR module
+
 const PGRLinks = ({ matchPath }) => {
   const { t } = useTranslation();
   const [params, setParams, clearParams] = Digit.Hooks.useSessionStorage(PGR_CITIZEN_CREATE_COMPLAINT, {});
@@ -76,7 +78,7 @@ const PGRLinks = ({ matchPath }) => {
 
   const links = [
     {
-      link: `${matchPath}/create-complaint/complaint-type`,
+      link: `${matchPath}/complaint/create/complaint-type`,
       i18nKey: t("CS_COMMON_FILE_A_COMPLAINT"),
     },
     {
@@ -105,9 +107,10 @@ const componentsToRegister = {
   PGRSelectRating: SelectRating,
   PGRResponseCitzen: ResponseCitizen,
   GeoLocations,
-  SelectAddress,
   SelectImages,
   CreatePGRFlow: CreatePGRFlow,
+  SelectAddress,
+ 
 };
 
 export const initPGRComponents = () => {

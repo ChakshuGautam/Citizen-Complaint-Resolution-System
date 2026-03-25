@@ -39,7 +39,7 @@ export const CreateComplaintConfig = {
                 error: "CORE_COMMON_REQUIRED_ERRMSG",
                 validation: {
                   required: true,
-                  pattern: /^(?!.*[ _-]{2})(?!^[\s_-])(?!.*[\s_-]$)(?=^[A-Za-z][A-Za-z0-9 _\-\(\)]{4,29}$)^.*$/,
+                  pattern: /^(?!.*[ _-]{2})(?!^[\s_-])(?!.*[\s_-]$)(?=^[A-Za-z][A-Za-z0-9 _\-\(\)\.]{3,29}$)^.*$/,
                 }
               },
             },
@@ -60,7 +60,7 @@ export const CreateComplaintConfig = {
               },
               populators: {
                 name: "SelectComplaintType",
-                optionsKey: "menuPathName",
+                optionsKey: "i18nKey",
                 error: "CORE_COMMON_REQUIRED_ERRMSG",
               },
             },
@@ -152,38 +152,25 @@ export const CreateComplaintConfig = {
                 error: "CORE_COMMON_REQUIRED_ERRMSG",
               },
             },
-
             {
-              isMandatory: true,
-              key: "SelectCity",
-              type: "dropdown",
-              label: "CS_COMPLAINT_SELECT_CITY",
-              disable: false,
-              preProcess: {
-                updateDependent: ["populators.options"]
-              },
-              populators: {
-                name: "SelectCity",
-                optionsKey: "i18nKey",
-                error: "CORE_COMMON_REQUIRED_ERRMSG",
-              },
-            },
+              "key": "boundaryComponent",
+              "type": "boundary",
+              "inline": false,
+              "disable": false,
+              "populators": {
+                "fieldPairClassName": "boundary-filter-label-left-align",
+                "name": "boundaryComponent",
+                "levelConfig": { isSingleSelect: ["zone", "region"] },
+                "layoutConfig": {
+                  "isDropdownLayoutHorizontal": true,
+                  "isLabelFieldLayoutHorizontal": true
 
+                },
+                "hierarchyType": "ADMIN",
+                "noCardStyle": false,
+                "module": "CMS-BOUNDARY"
+              }
 
-            {
-              isMandatory: true,
-              key: "SelectLocality",
-              type: "dropdown",
-              label: "CS_COMPLAINT_LOCALITY",
-              disable: false,
-              preProcess: {
-                updateDependent: ["populators.options"]
-              },
-              populators: {
-                name: "SelectLocality",
-                optionsKey: "i18nKey",
-                error: "CORE_COMMON_REQUIRED_ERRMSG",
-              },
             },
             {
               inline: true,
