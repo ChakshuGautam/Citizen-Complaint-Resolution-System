@@ -1,0 +1,9 @@
+# Local environment overrides - never revert these
+utilities/crs_dataloader/ui-mockup/src/api/config.ts
+utilities/crs_dataloader/ui-mockup/src/App.tsx
+utilities/crs_dataloader/ui-mockup/src/pages/LoginPage.tsx
+utilities/crs_dataloader/ui-mockup/vite.config.ts
+frontend/micro-ui/web/.env
+frontend/micro-ui/web/src/setupProxy.js
+frontend/micro-ui/web/public/globalConfigs.js
+.mcp.json

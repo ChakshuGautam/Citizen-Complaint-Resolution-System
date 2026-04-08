@@ -1,0 +1,346 @@
+/* Floating Action Button */
+.ccrs-chat-fab {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: #f47738;
+  color: white;
+  border: none;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 99999;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+.ccrs-chat-fab:hover {
+  transform: scale(1.08);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+}
+
+/* Chat Panel */
+.ccrs-chat-panel {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  width: 420px;
+  height: 560px;
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+  display: flex;
+  flex-direction: column;
+  z-index: 99999;
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+/* Header */
+.ccrs-chat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px 0 0;
+  background: #0b0c0c;
+  color: #fff;
+  min-height: 44px;
+}
+.ccrs-chat-tabs {
+  display: flex;
+  flex: 1;
+}
+.ccrs-tab {
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.6);
+  padding: 12px 16px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  border-bottom: 2px solid transparent;
+  transition: all 0.15s;
+}
+.ccrs-tab.active {
+  color: #fff;
+  border-bottom-color: #f47738;
+}
+.ccrs-tab:hover {
+  color: #fff;
+}
+.ccrs-chat-close {
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 22px;
+  cursor: pointer;
+  padding: 4px 8px;
+  line-height: 1;
+}
+.ccrs-chat-close:hover {
+  color: #fff;
+}
+
+/* Messages */
+.ccrs-chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ccrs-chat-empty {
+  color: #666;
+  text-align: center;
+  padding: 40px 20px;
+  font-size: 14px;
+  line-height: 1.6;
+}
+.ccrs-chat-hint {
+  color: #999;
+  font-size: 12px;
+  font-style: italic;
+}
+
+/* Message bubbles */
+.ccrs-msg {
+  max-width: 85%;
+  animation: ccrs-fade-in 0.15s ease;
+}
+.ccrs-msg-user {
+  align-self: flex-end;
+}
+.ccrs-msg-assistant {
+  align-self: flex-start;
+}
+.ccrs-msg-content {
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.ccrs-msg-user .ccrs-msg-content {
+  background: #f47738;
+  color: #fff;
+}
+.ccrs-msg-assistant .ccrs-msg-content {
+  background: #f3f3f3;
+  color: #1a1a1a;
+}
+.ccrs-msg-commit {
+  font-size: 11px;
+  color: #22863a;
+  margin-top: 4px;
+  font-family: monospace;
+}
+
+/* Status bar */
+.ccrs-chat-status {
+  padding: 6px 12px;
+  background: #fffbe6;
+  border-top: 1px solid #ffe58f;
+  font-size: 12px;
+  color: #d48806;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ccrs-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid #d48806;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: ccrs-spin 0.6s linear infinite;
+}
+
+/* Input area */
+.ccrs-chat-input-area {
+  display: flex;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid #e8e8e8;
+  background: #fafafa;
+}
+.ccrs-chat-input {
+  flex: 1;
+  border: 1px solid #d9d9d9;
+  border-radius: 6px;
+  padding: 8px;
+  font-size: 13px;
+  resize: none;
+  font-family: inherit;
+  outline: none;
+}
+.ccrs-chat-input:focus {
+  border-color: #f47738;
+}
+.ccrs-chat-send {
+  padding: 8px 16px;
+  background: #f47738;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  align-self: flex-end;
+}
+.ccrs-chat-send:disabled {
+  background: #ccc;
+  cursor: not-allowed;
+}
+
+/* Versions Panel */
+.ccrs-versions {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+}
+.ccrs-versions-loading,
+.ccrs-versions-empty {
+  color: #999;
+  text-align: center;
+  padding: 30px;
+  font-size: 13px;
+}
+.ccrs-versions-header {
+  margin-bottom: 12px;
+}
+.ccrs-btn-save {
+  width: 100%;
+  padding: 8px;
+  background: #0b0c0c;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+}
+.ccrs-btn-save:hover {
+  background: #333;
+}
+
+/* Save Modal */
+.ccrs-save-modal {
+  background: #f9f9f9;
+  border: 1px solid #e8e8e8;
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+.ccrs-save-input,
+.ccrs-save-notes {
+  width: 100%;
+  border: 1px solid #d9d9d9;
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 13px;
+  margin-bottom: 8px;
+  font-family: inherit;
+  box-sizing: border-box;
+}
+.ccrs-save-actions {
+  display: flex;
+  gap: 8px;
+}
+.ccrs-btn-confirm {
+  padding: 6px 16px;
+  background: #22863a;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.ccrs-btn-confirm:disabled {
+  background: #aaa;
+}
+.ccrs-btn-cancel {
+  padding: 6px 16px;
+  background: #eee;
+  color: #333;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+/* Version Items */
+.ccrs-versions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ccrs-version-item {
+  background: #f9f9f9;
+  border: 1px solid #e8e8e8;
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+.ccrs-version-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ccrs-version-hash {
+  font-size: 12px;
+  background: #e8e8e8;
+  padding: 1px 6px;
+  border-radius: 3px;
+  color: #333;
+}
+.ccrs-version-label {
+  font-size: 11px;
+  background: #f47738;
+  color: #fff;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-weight: 500;
+}
+.ccrs-version-date {
+  font-size: 11px;
+  color: #999;
+  margin-left: auto;
+}
+.ccrs-version-msg {
+  font-size: 12px;
+  color: #555;
+  margin-top: 4px;
+  line-height: 1.4;
+}
+.ccrs-btn-rollback {
+  margin-top: 6px;
+  padding: 3px 10px;
+  background: none;
+  border: 1px solid #d9d9d9;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 11px;
+  color: #666;
+}
+.ccrs-btn-rollback:hover {
+  border-color: #f47738;
+  color: #f47738;
+}
+.ccrs-btn-rollback:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Animations */
+@keyframes ccrs-fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes ccrs-spin {
+  to { transform: rotate(360deg); }
+}

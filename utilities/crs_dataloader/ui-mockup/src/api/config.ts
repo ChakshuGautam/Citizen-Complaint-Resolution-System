@@ -8,9 +8,9 @@ export interface Environment {
 
 export const ENVIRONMENTS: Environment[] = [
   {
-    name: 'Chakshu Dev',
-    url: 'https://api.egov.theflywheel.in',
-    description: 'Chakshu development environment',
+    name: 'Local DIGIT',
+    url: 'http://46.225.143.82:18000',
+    description: 'Local mh-iterations backend',
   },
 ];
 

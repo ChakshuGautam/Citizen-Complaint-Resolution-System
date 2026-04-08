@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "DIGIT-MCP": {
+      "command": "node",
+      "args": ["/opt/egov/DIGIT-MCP/dist/index.js"],
+      "env": {
+        "CRS_API_URL": "http://localhost:18000",
+        "CRS_USERNAME": "ADMIN",
+        "CRS_PASSWORD": "eGov@123",
+        "CRS_STATE_TENANT": "pg",
+        "CRS_TENANT_ID": "pg.citya",
+        "MCP_TRANSPORT": "stdio",
+        "MCP_ENABLE_ALL_GROUPS": "1",
+        "MCP_LOG_FILE": "/tmp/digit-mcp-logs/access.log"
+      }
+    }
+  }
+}

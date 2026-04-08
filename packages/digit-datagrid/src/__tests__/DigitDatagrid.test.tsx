@@ -22,10 +22,12 @@ vi.mock('ra-core', () => ({
   useUpdate: () => [vi.fn()],
   useDelete: () => [vi.fn()],
   useGetList: () => ({ data: [], isPending: false }),
+  useTranslate: () => (key: string, options?: { _?: string; [k: string]: unknown }) => options?._ ?? key,
 }));
 
 vi.mock('react-router-dom', () => ({
   useNavigate: () => vi.fn(),
+  useLocation: () => ({ pathname: '/', search: '', hash: '', state: null }),
 }));
 
 const columns: DigitColumn[] = [

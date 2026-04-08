@@ -26,6 +26,7 @@ import {
   FileCode,
   Workflow,
   Palette,
+  BarChart3,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -51,6 +52,7 @@ const navGroups = [
     items: [
       { id: 'complaint-types', nameKey: 'app.nav.complaint_types', path: '/manage/complaint-types', icon: AlertTriangle },
       { id: 'complaints', nameKey: 'app.nav.complaints', path: '/manage/complaints', icon: MessageSquare },
+      { id: 'charts', nameKey: 'app.nav.charts', path: '/manage/charts', icon: BarChart3 },
       { id: 'localization', nameKey: 'app.nav.localization', path: '/manage/localization', icon: Globe },
     ],
   },

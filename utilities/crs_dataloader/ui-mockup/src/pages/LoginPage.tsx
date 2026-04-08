@@ -20,7 +20,7 @@ export default function LoginPage() {
     environment: ENVIRONMENTS[0].url,
     username: 'ADMIN',
     password: 'eGov@123',
-    tenantCode: 'statea',
+    tenantCode: 'pg.citya',
   });
   const [mode, setMode] = useState<AppMode>('onboarding');
   const [showPassword, setShowPassword] = useState(false);

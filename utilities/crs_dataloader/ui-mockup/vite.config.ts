@@ -8,9 +8,16 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
+      '@digit-mcp/data-provider': '/opt/egov/DIGIT-MCP/packages/data-provider/dist/index.js',
     },
   },
   server: {
     allowedHosts: ['crs-mockup.egov.theflywheel.in'],
+    proxy: {
+      '/api/agent': {
+        target: 'http://localhost:4100',
+        changeOrigin: true,
+      },
+    },
   },
 })

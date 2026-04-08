@@ -1,3 +1,4 @@
+import { Tag } from "@egovernments/digit-ui-react-components";
 import { Link } from "react-router-dom";
 import _ from "lodash";
 

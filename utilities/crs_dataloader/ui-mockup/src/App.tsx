@@ -1,7 +1,9 @@
+import ChatWidget from './components/AIChat/ChatWidget';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useState, createContext, useContext, useEffect, useCallback } from 'react';
 import Layout from './components/layout/Layout';
 import LoginPage from './pages/LoginPage';
+import ChartsPage from './pages/ChartsPage';
 import Phase1Page from './pages/Phase1Page';
 import Phase2Page from './pages/Phase2Page';
 import Phase3Page from './pages/Phase3Page';
@@ -119,6 +121,7 @@ function ManagementAdmin() {
         {/* Custom routes */}
         <CustomRoutes>
           <Route path="/advanced" element={<AdvancedPage />} />
+          <Route path="/charts" element={<ChartsPage />} />
         </CustomRoutes>
       </CoreAdminUI>
     </CoreAdminContext>
@@ -150,8 +153,8 @@ function restoreApiClientFromStorage(): { isAuthenticated: boolean; user: AppSta
       apiClient.setTenantId(parsed.tenant);
 
       // Also configure the shared digitClient from the bridge
-      const restoredEnv = parsed.environment || 'https://api.egov.theflywheel.in';
-      const restoredTenant = parsed.tenant || 'statea';
+      const restoredEnv = parsed.environment || 'http://46.225.143.82:18000';
+      const restoredTenant = parsed.tenant || 'pg.citya';
       configureDigitClient(restoredEnv, parsed.authToken, {
         id: parsed.user.id ?? 0,
         uuid: parsed.user.uuid ?? '',
@@ -193,8 +196,8 @@ function App() {
     return {
       isAuthenticated: false,
       user: null,
-      environment: 'https://api.egov.theflywheel.in',
-      tenant: 'statea',
+      environment: 'http://46.225.143.82:18000',
+      tenant: 'pg.citya',
       mode: 'onboarding',
       currentPhase: 1,
       completedPhases: [],
@@ -419,6 +422,7 @@ function App() {
         <Toaster />
       </BrowserRouter>
       </ThemeProvider>
+        <ChatWidget />
     </AppContext.Provider>
   );
 }

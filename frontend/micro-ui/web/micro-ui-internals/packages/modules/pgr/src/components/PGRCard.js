@@ -1,4 +1,5 @@
 import { EmployeeModuleCard, SVG } from "@egovernments/digit-ui-react-components";
+import { LandingPageCard } from "@egovernments/digit-ui-components";
 import React, { useEffect } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -26,6 +27,7 @@ const PGRCard = () => {
       label: t(labelKey),
       link: `/${window?.contextPath}/employee/pgr/${pathSuffix}`,
       roles: roles,
+      icon: "ArrowForward",
     };
   };
 
@@ -44,13 +46,14 @@ const PGRCard = () => {
   links = links.filter(hasRequiredRoles);
 
   const propsForModuleCard = {
-    Icon: "UpdateExpense",
+    icon: "ReportProblem",
     moduleName: t("PGR"),
-    kpis: [],
+    moduleAlignment: "left",
+    metrics: [],
     links: links,
     className: "microplan-employee-module-card",
   };
-  return <EmployeeModuleCard {...propsForModuleCard} />;
+  return <LandingPageCard {...propsForModuleCard} />;
 };
 
 export default PGRCard;

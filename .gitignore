@@ -1,2 +1,5 @@
 .worktrees/
 node_modules/
+agent-backend/chats/
+agent-backend/.active-session
+agent-backend/chats/
