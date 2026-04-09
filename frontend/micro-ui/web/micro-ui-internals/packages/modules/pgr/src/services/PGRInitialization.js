@@ -16,18 +16,30 @@ const initializePGRModule = async ({ tenantId }) => {
   const hierarchyType = window?.globalConfigs?.getConfig("HIERARCHY_TYPE") || "ADMIN";
   const boundaryType =  window?.globalConfigs?.getConfig("BOUNDARY_TYPE") || "Locality";
 
-    // Get user info from localStorage
-  const citizenInfo = window.localStorage.getItem("user-info");
+    // Get user info from localStorage (KC adapter stores as "Citizen.user-info", native as "user-info")
+  const citizenInfo = window.localStorage.getItem("Citizen.user-info") || window.localStorage.getItem("user-info");
 
   if (citizenInfo) {
-    const user = JSON.parse(citizenInfo);
-    const userType = user.type;
+    try {
+      const user = JSON.parse(citizenInfo);
+      const userType = user.type;
 
-    if (userType === "CITIZEN") {
-      tenantId = Digit.SessionStorage.get("CITIZEN.COMMON.HOME.CITY")?.code;
+      if (userType === "CITIZEN") {
+        tenantId = Digit.SessionStorage.get("CITIZEN.COMMON.HOME.CITY")?.code
+          || window.localStorage.getItem("Citizen.tenant-id")
+          || tenantId;
+      }
+    } catch (e) {
+      console.warn("Failed to parse citizen info:", e);
     }
-  } else {
-    console.log("No CITIZEN user info found in localStorage.");
+  }
+
+  // Ensure we use a city-level tenant (boundaries are seeded at city level, not state level)
+  // If tenantId is state-level (no dot), append the default city
+  if (tenantId && !tenantId.includes(".")) {
+    const defaultCity = tenantId + ".citya"; // TODO: make configurable or discover from MDMS
+    console.log("[PGRInit] State-level tenant " + tenantId + " → using city " + defaultCity);
+    tenantId = defaultCity;
   }
 
 

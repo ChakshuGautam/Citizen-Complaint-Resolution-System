@@ -1,4 +1,6 @@
 import { Loader } from "@egovernments/digit-ui-react-components";
+console.log('Check CMS');
+console.log('Loaded');
 import React, { useState } from "react";
 import { useRouteMatch } from "react-router-dom";
 import { default as EmployeeApp } from "./pages/employee";
@@ -19,7 +21,10 @@ import { ComplaintsList } from "./pages/citizen/ComplaintsList";
 import ComplaintDetailsPage from "./pages/citizen/ComplaintDetails";
 import SelectRating from "./pages/citizen/Rating/SelectRating";
 import ResponseCitizen from "./pages/citizen/Response";
-
+import GeoLocations from "./components/GeoLocations";
+import SelectAddress from "../../pgr/src/pages/citizen/Create/Steps/SelectAddress";
+import SelectImages from "../../pgr/src/pages/citizen/Create/Steps/SelectImages";
+import CreatePGRFlow from "./pages/citizen/Create/FormExplorer";
 
 
 export const PGRReducers = getRootReducer;
@@ -29,9 +34,9 @@ export const PGRModule = ({ stateCode, userType, tenants }) => {
   const { path, url } = useRouteMatch();
   const tenantId = Digit.ULBService.getCurrentTenantId();
 
-  const hierarchyType = window?.globalConfigs?.getConfig("HIERARCHY_TYPE") || "HIERARCHYTEST";
+  const hierarchyType = window?.globalConfigs?.getConfig("HIERARCHY_TYPE") || "ADMIN";
   const moduleCode = ["pgr", `boundary-${hierarchyType?.toString().toLowerCase()}`];
-  const modulePrefix = "hcm";
+  const modulePrefix = "rainmaker";
   const language = Digit.StoreData.getCurrentLanguage();
   const { isLoading, data: store } = Digit.Services.useStore({
     stateCode,
@@ -40,9 +45,10 @@ export const PGRModule = ({ stateCode, userType, tenants }) => {
     modulePrefix,
   });
   let user = Digit?.SessionStorage.get("User");
-  const { isLoading: isPGRInitializing } = Digit.Hooks.pgr.usePGRInitialization({
-    tenantId: tenantId,
-  });
+
+  // Initialize boundary hierarchy for both employee and citizen users
+  // Citizens need it for the complaint location dropdown
+  const { isLoading: isPGRInitializing } = Digit.Hooks.pgr.usePGRInitialization({ tenantId: tenantId });
 
   Digit.SessionStorage.set("PGR_TENANTS", tenants);
 
@@ -71,7 +77,7 @@ const PGRLinks = ({ matchPath }) => {
 
   const links = [
     {
-      link: `${matchPath}/create-complaint/complaint-type`,
+      link: `${matchPath}/complaint/create/complaint-type`,
       i18nKey: t("CS_COMMON_FILE_A_COMPLAINT"),
     },
     {
@@ -95,10 +101,14 @@ const componentsToRegister = {
   PGRCreateComplaint: CreateComplaint,
   PGRResponse: Response,
   PGRBreadCrumbs: BreadCrumbs,
-  PGRComplaintsList : ComplaintsList,
-  PGRComplaintDetailsPage : ComplaintDetailsPage,
-  PGRSelectRating : SelectRating,
-  PGRResponseCitzen : ResponseCitizen
+  PGRComplaintsList: ComplaintsList,
+  PGRComplaintDetailsPage: ComplaintDetailsPage,
+  PGRSelectRating: SelectRating,
+  PGRResponseCitzen: ResponseCitizen,
+  GeoLocations,
+  SelectAddress,
+  SelectImages,
+  CreatePGRFlow: CreatePGRFlow,
 };
 
 export const initPGRComponents = () => {

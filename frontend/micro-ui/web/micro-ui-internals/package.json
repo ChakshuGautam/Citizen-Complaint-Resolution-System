@@ -5,16 +5,17 @@
   "workspaces": [
     "example",
     "packages/css",
+    "packages/libraries",
     "packages/modules/*"
   ],
   "author": "JaganKumar <jagan.kumar@egov.org.in>",
   "license": "MIT",
   "private": true,
   "engines": {
-    "node": ">=14"
+    "node": "14"
   },
   "scripts": {
-    "start": "run-s build start:dev",
+    "start": "SKIP_PREFLIGHT_CHECK=true run-s build start:dev",
     "sprint": "SKIP_PREFLIGHT_CHECK=true run-s start:script",
     "start:dev": "run-p dev:**",
     "start:script": "./scripts/create.sh",
@@ -24,6 +25,8 @@
     "dev:pgr": "cd packages/modules/pgr && yarn start",
     "build": "run-p build:**",
     "build:css": "cd packages/css && yarn prepublish",
+    "build:libraries": "cd packages/libraries && yarn build",
+    "build:core": "cd packages/modules/core && yarn build",
     "build:pgr": "cd packages/modules/pgr && yarn build",
     "deploy:jenkins": "./scripts/jenkins.sh",
     "clean": "rm -rf node_modules"
@@ -53,8 +56,8 @@
     "*.{js,css,md}": "prettier --write"
   },
   "dependencies": {
-    "@egovernments/digit-ui-libraries": "1.8.14",
-    "@egovernments/digit-ui-components":  "0.2.0-beta.45",
+    "@egovernments/digit-ui-libraries": "1.9.3",
+    "@egovernments/digit-ui-components": "0.2.0-beta.45",
     "@egovernments/digit-ui-react-components": "1.8.21",
     "ajv": "8.12.0",
     "lodash": "4.17.21",
