@@ -599,7 +599,9 @@ export function parseComplaintTypeExcel(workbook: XLSX.WorkBook): {
 
   jsonData.forEach((row, index) => {
     const serviceCode = String(row['serviceCode'] || row['ServiceCode'] || row['code'] || '').trim();
-    const serviceName = String(row['serviceName'] || row['ServiceName'] || row['name'] || '').trim();
+    const name = String(row['name'] || row['Name'] || row['serviceName'] || row['ServiceName'] || '').trim();
+    const keywordsRaw = String(row['keywords'] || row['Keywords'] || '').trim();
+    const keywords = keywordsRaw || name.toLowerCase().replace(/\s+/g, ',');
     const department = String(row['department'] || row['Department'] || '').trim();
     const slaHours = parseInt(String(row['slaHours'] || row['SlaHours'] || row['sla'] || '24'), 10) || 24;
     const activeStr = String(row['active'] || row['Active'] || row['isActive'] || 'true').trim().toLowerCase();
@@ -615,10 +617,10 @@ export function parseComplaintTypeExcel(workbook: XLSX.WorkBook): {
       return;
     }
 
-    if (!serviceName) {
+    if (!name) {
       errors.push({
         row: index + 2,
-        field: 'serviceName',
+        field: 'name',
         message: 'Service name is required',
         code: 'REQUIRED_FIELD',
       });
@@ -635,7 +637,7 @@ export function parseComplaintTypeExcel(workbook: XLSX.WorkBook): {
       return;
     }
 
-    complaintTypes.push({ serviceCode, serviceName, department, slaHours, active });
+    complaintTypes.push({ serviceCode, name, keywords, department, slaHours, active });
   });
 
   return {

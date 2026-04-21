@@ -115,19 +115,19 @@ export const localizationService = {
   buildComplaintTypeLocalizations(
     _tenantId: string,
     serviceCode: string,
-    serviceName: string,
+    name: string,
     locale: string = 'en_IN'
   ): LocalizationMessage[] {
     return [
       {
         code: `SERVICEDEFS.${serviceCode}`,
-        message: serviceName,
+        message: name,
         module: 'rainmaker-pgr',
         locale,
       },
       {
         code: `SERVICEDEFS.${serviceCode.toUpperCase()}`,
-        message: serviceName,
+        message: name,
         module: 'rainmaker-pgr',
         locale,
       },
@@ -201,11 +201,11 @@ export const localizationService = {
   // Upload localizations for all complaint types
   async uploadComplaintTypeLocalizations(
     tenantId: string,
-    types: { serviceCode: string; serviceName: string }[],
+    types: { serviceCode: string; name: string }[],
     locale: string = 'en_IN'
   ): Promise<{ success: number; failed: number }> {
     const messages = types.flatMap((t) =>
-      this.buildComplaintTypeLocalizations(tenantId, t.serviceCode, t.serviceName, locale)
+      this.buildComplaintTypeLocalizations(tenantId, t.serviceCode, t.name, locale)
     );
     return this.upsertMessages(tenantId, locale, messages);
   },

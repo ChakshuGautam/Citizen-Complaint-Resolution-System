@@ -171,7 +171,8 @@ export default function Phase3Page() {
           state.tenant,
           complaintTypes.map(ct => ({
             serviceCode: ct.serviceCode,
-            serviceName: ct.serviceName,
+            name: ct.name,
+            keywords: ct.keywords,
             department: ct.department,
             slaHours: ct.slaHours,
             active: ct.active,
@@ -184,7 +185,7 @@ export default function Phase3Page() {
           state.tenant,
           complaintTypes.map(ct => ({
             serviceCode: ct.serviceCode,
-            serviceName: ct.serviceName,
+            name: ct.name,
           })),
           'en_IN'
         );
@@ -491,7 +492,7 @@ export default function Phase3Page() {
                               </Badge>
                             </TableCell>
                             <TableCell className="font-mono text-xs sm:text-sm">{type.serviceCode}</TableCell>
-                            <TableCell className="text-xs sm:text-sm">{type.serviceName}</TableCell>
+                            <TableCell className="text-xs sm:text-sm">{type.name}</TableCell>
                             <TableCell className="text-xs sm:text-sm">{type.slaHours}h</TableCell>
                             <TableCell className="font-mono text-xs sm:text-sm">{type.department}</TableCell>
                           </TableRow>
@@ -585,7 +586,7 @@ export default function Phase3Page() {
                 ) : (
                   <Loader2 className="w-4 h-4 text-primary animate-spin" />
                 )}
-                <span>{type.serviceCode} - {type.serviceName}</span>
+                <span>{type.serviceCode} - {type.name}</span>
               </div>
             ))}
             {complaintTypes.length > 5 && (

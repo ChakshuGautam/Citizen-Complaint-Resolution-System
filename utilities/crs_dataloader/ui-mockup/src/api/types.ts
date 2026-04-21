@@ -146,7 +146,8 @@ export interface Designation {
 // Complaint Type / Service Definition
 export interface ComplaintType {
   serviceCode: string;
-  serviceName: string;
+  name: string;
+  keywords: string;
   department: string;
   slaHours: number;
   menuPath?: string;
@@ -378,7 +379,8 @@ export interface DesignationExcelRow {
 
 export interface ComplaintTypeExcelRow {
   serviceCode: string;
-  serviceName: string;
+  name: string;
+  keywords: string;
   department: string;
   slaHours: number;
   active: boolean;
