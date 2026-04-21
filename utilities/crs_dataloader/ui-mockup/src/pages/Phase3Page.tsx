@@ -137,16 +137,18 @@ export default function Phase3Page() {
       // Create designations
       if (designations.length > 0) {
         setProgressMessage('Creating designations...');
-        const desigResults = await mdmsService.createDesignations(
-          state.tenant,
-          designations.map(d => ({
-            code: d.code,
-            name: d.name,
-            description: d.description,
-            department: d.department,
-            active: d.active,
-          }))
-        );
+        const payload = designations.map(d => ({
+          code: d.code,
+          name: d.name,
+          description: d.description,
+          department: d.department,
+          active: d.active,
+        }));
+        // Temporary diagnostic while chasing the "description not found" 400s:
+        // logs the exact object handed to the service. Remove once the flow is stable.
+        // eslint-disable-next-line no-console
+        console.log('[configurator] designation payload ->', JSON.stringify(payload));
+        const desigResults = await mdmsService.createDesignations(state.tenant, payload);
         setCreatedDesigs(desigResults.success.length);
 
         // Create localizations for designations

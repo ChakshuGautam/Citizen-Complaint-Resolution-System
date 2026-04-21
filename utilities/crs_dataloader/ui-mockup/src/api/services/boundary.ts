@@ -23,7 +23,9 @@ export const boundaryService = {
     return hierarchies as BoundaryHierarchy[];
   },
 
-  // Create a new boundary hierarchy
+  // Create a new boundary hierarchy.
+  // Note: the backend returns BoundaryHierarchy as an ARRAY even though the create
+  // payload sends a single object — unwrap the first element.
   async createHierarchy(
     tenantId: string,
     hierarchyType: string,
@@ -38,7 +40,9 @@ export const boundaryService = {
       },
     });
 
-    return response.BoundaryHierarchy as BoundaryHierarchy;
+    const raw = response.BoundaryHierarchy;
+    if (Array.isArray(raw)) return raw[0] as BoundaryHierarchy;
+    return raw as BoundaryHierarchy;
   },
 
   // Helper to create hierarchy from level names
