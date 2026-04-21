@@ -142,6 +142,7 @@ export default function Phase3Page() {
           designations.map(d => ({
             code: d.code,
             name: d.name,
+            description: d.description,
             department: d.department,
             active: d.active,
           }))
