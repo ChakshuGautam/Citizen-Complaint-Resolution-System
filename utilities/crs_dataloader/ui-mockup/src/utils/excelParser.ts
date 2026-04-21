@@ -694,6 +694,7 @@ export function parseEmployeeExcel(workbook: XLSX.WorkBook): {
     const mobileNumber = String(row['mobileNumber'] || row['MobileNumber'] || row['mobile'] || row['phone'] || '').trim();
     const emailId = String(row['emailId'] || row['EmailId'] || row['email'] || '').trim() || undefined;
     const gender = String(row['gender'] || row['Gender'] || '').trim() || undefined;
+    const dob = String(row['dob'] || row['DOB'] || row['dateOfBirth'] || '').trim() || undefined;
     const department = String(row['department'] || row['Department'] || '').trim();
     const designation = String(row['designation'] || row['Designation'] || '').trim();
     const roles = String(row['roles'] || row['Roles'] || row['role'] || 'EMPLOYEE').trim();
@@ -783,6 +784,7 @@ export function parseEmployeeExcel(workbook: XLSX.WorkBook): {
       mobileNumber,
       emailId,
       gender,
+      dob,
       department,
       designation,
       roles,

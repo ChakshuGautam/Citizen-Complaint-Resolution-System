@@ -101,6 +101,7 @@ export const hrmsService = {
     mobileNumber: string;
     emailId?: string;
     gender?: string;
+    dob?: number;
     department: string;
     designation: string;
     roles: Role[];
@@ -109,6 +110,9 @@ export const hrmsService = {
     password?: string;
   }): Employee {
     const now = Date.now();
+    // HRMS @NotNull on user.dob. Default to 1990-01-01 UTC when the form/sheet
+    // didn't provide one, since HRMS otherwise rejects the whole create.
+    const dob = data.dob ?? Date.UTC(1990, 0, 1);
 
     const user: EmployeeUser = {
       userName: data.userName.toLowerCase(),
@@ -117,6 +121,7 @@ export const hrmsService = {
       mobileNumber: data.mobileNumber,
       emailId: data.emailId,
       gender: data.gender,
+      dob,
       type: 'EMPLOYEE',
       active: true,
       tenantId: data.tenantId,

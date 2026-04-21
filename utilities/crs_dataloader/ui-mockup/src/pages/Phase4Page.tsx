@@ -243,6 +243,7 @@ export default function Phase4Page() {
             mobileNumber: emp.mobileNumber,
             emailId: emp.emailId,
             gender: emp.gender,
+            dob: emp.dob ? new Date(emp.dob).getTime() : undefined,
             department: emp.department,
             designation: emp.designation,
             roles,
