@@ -60,7 +60,12 @@ export const boundaryService = {
   // Boundary Methods
   // ============================================
 
-  // Search boundaries
+  // Search boundaries — returns the hierarchical tree flattened to a list.
+  //
+  // Uses /boundary-service/boundary-relationships/_search (not /boundary/_search) because
+  // the latter searches boundary *entities* by code and doesn't return children; only
+  // the relationships endpoint walks the hierarchy. Query params (not body) are how this
+  // endpoint accepts its filters.
   async searchBoundaries(
     tenantId: string,
     options?: {
@@ -71,33 +76,45 @@ export const boundaryService = {
       offset?: number;
     }
   ): Promise<Boundary[]> {
-    const response = await apiClient.post(ENDPOINTS.BOUNDARY_SEARCH, {
-      RequestInfo: apiClient.buildRequestInfo(),
-      Boundary: {
-        tenantId,
-        hierarchyType: options?.hierarchyType,
-        boundaryType: options?.boundaryType,
-        codes: options?.codes,
-        limit: options?.limit || 100,
-        offset: options?.offset || 0,
-      },
-    });
+    const qs = new URLSearchParams({ tenantId, includeChildren: 'true' });
+    if (options?.hierarchyType) qs.set('hierarchyType', options.hierarchyType);
+    if (options?.boundaryType)  qs.set('boundaryType', options.boundaryType);
+    if (options?.codes?.length) qs.set('codes', options.codes.join(','));
+
+    const response = await apiClient.post(
+      `${ENDPOINTS.BOUNDARY_RELATIONSHIP_SEARCH}?${qs.toString()}`,
+      { RequestInfo: apiClient.buildRequestInfo() },
+    );
 
     // Flatten the nested boundary structure
     const tenantBoundaries = response.TenantBoundary || [];
     const boundaries: Boundary[] = [];
+    const seen = new Set<string>();
 
-    for (const tb of tenantBoundaries as { boundary: Boundary }[]) {
-      if (tb.boundary) {
-        this.flattenBoundaries(tb.boundary, boundaries);
+    for (const tb of tenantBoundaries as { boundary: Boundary | Boundary[]; hierarchyType?: string }[]) {
+      if (!tb.boundary) continue;
+      const items = Array.isArray(tb.boundary) ? tb.boundary : [tb.boundary];
+      for (const root of items) {
+        this.flattenBoundaries(root, boundaries, seen, tb.hierarchyType);
       }
     }
 
     return boundaries;
   },
 
-  // Helper to flatten nested boundary tree
-  flattenBoundaries(boundary: Boundary, result: Boundary[]): void {
+  // Helper to flatten nested boundary tree. Dedupes by code because the relationships
+  // endpoint duplicates children under their parent in the response payload.
+  flattenBoundaries(
+    boundary: Boundary,
+    result: Boundary[],
+    seen?: Set<string>,
+    hierarchyType?: string,
+  ): void {
+    const code = boundary.code;
+    if (seen && code) {
+      if (seen.has(code)) return;
+      seen.add(code);
+    }
     result.push({
       id: boundary.id,
       tenantId: boundary.tenantId,
@@ -105,14 +122,14 @@ export const boundaryService = {
       name: boundary.name,
       boundaryType: boundary.boundaryType,
       parent: boundary.parent,
-      hierarchyType: boundary.hierarchyType,
+      hierarchyType: boundary.hierarchyType ?? hierarchyType,
       latitude: boundary.latitude,
       longitude: boundary.longitude,
     });
 
     if (boundary.children) {
       for (const child of boundary.children) {
-        this.flattenBoundaries(child, result);
+        this.flattenBoundaries(child, result, seen, hierarchyType);
       }
     }
   },
