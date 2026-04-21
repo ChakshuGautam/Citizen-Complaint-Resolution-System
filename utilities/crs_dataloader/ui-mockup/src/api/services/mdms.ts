@@ -102,6 +102,7 @@ export const mdmsService = {
     return this.create(tenantId, MDMS_SCHEMAS.DESIGNATION, designation.code, {
       code: designation.code,
       name: designation.name,
+      description: designation.description,
       department: designation.department,
       active: designation.active,
     });

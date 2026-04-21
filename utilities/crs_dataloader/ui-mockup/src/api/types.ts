@@ -137,7 +137,8 @@ export interface Department {
 export interface Designation {
   code: string;
   name: string;
-  department?: string;
+  description: string;
+  department?: string[];
   active: boolean;
   tenantId?: string;
 }
@@ -370,7 +371,8 @@ export interface DepartmentExcelRow {
 export interface DesignationExcelRow {
   code: string;
   name: string;
-  department?: string;
+  description: string;
+  department?: string[];
   active: boolean;
 }
 

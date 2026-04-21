@@ -521,7 +521,9 @@ export function parseDesignationExcel(workbook: XLSX.WorkBook): {
   jsonData.forEach((row, index) => {
     const code = String(row['code'] || row['Code'] || row['designationCode'] || '').trim();
     const name = String(row['name'] || row['Name'] || row['designationName'] || '').trim();
-    const department = String(row['department'] || row['Department'] || '').trim() || undefined;
+    const description = String(row['description'] || row['Description'] || '').trim() || name;
+    const deptRaw = String(row['department'] || row['Department'] || '').trim();
+    const department = deptRaw ? deptRaw.split(',').map(s => s.trim()).filter(Boolean) : undefined;
     const activeStr = String(row['active'] || row['Active'] || row['isActive'] || 'true').trim().toLowerCase();
     const active = activeStr === 'true' || activeStr === 'yes' || activeStr === '1';
 
@@ -545,7 +547,7 @@ export function parseDesignationExcel(workbook: XLSX.WorkBook): {
       return;
     }
 
-    designations.push({ code, name, department, active });
+    designations.push({ code, name, description, department, active });
   });
 
   return {
