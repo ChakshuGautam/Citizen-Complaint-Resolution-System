@@ -14911,7 +14911,7 @@
     },
     {
         "code": "CS_COMMON_HELPLINE",
-        "message": "HELPLINE",
+        "message": "Helpline",
         "module": "rainmaker-common",
         "locale": "en_IN"
     },
@@ -81296,6 +81296,30 @@
     {
         "code": "प्रोफ़ाइल संपादित करें ",
         "message": "Edit Profile",
+        "module": "rainmaker-common",
+        "locale": "en_IN"
+    },
+    {
+        "code": "CS_LOGIN_REGISTER_WITH_EMAIL",
+        "message": "Login or register with email",
+        "module": "rainmaker-common",
+        "locale": "en_IN"
+    },
+    {
+        "code": "CS_USE_MOBILE_INSTEAD",
+        "message": "Use mobile number instead",
+        "module": "rainmaker-common",
+        "locale": "en_IN"
+    },
+    {
+        "code": "LOGIN_WITH_EMAIL",
+        "message": "Login with email",
+        "module": "rainmaker-common",
+        "locale": "en_IN"
+    },
+    {
+        "code": "LOGIN_WITH_MOBILE",
+        "message": "Login with mobile",
         "module": "rainmaker-common",
         "locale": "en_IN"
     }
