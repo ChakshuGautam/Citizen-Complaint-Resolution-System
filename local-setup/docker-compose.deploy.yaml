@@ -539,7 +539,25 @@ services:
       - egov-network
 
   egov-hrms:
-    image: egovio/egov-hrms:hrms-boundary-0a4e737
+    # digit-common-boundary-uuidlink: stacks on top of digit-common-boundary
+    # which fixes CCRS#482 (custom password on employee create) and
+    # CCRS#484 (null tenantId on User object breaking MDMS mobile
+    # validation). uuidlink additionally enables the uuid-link
+    # short-circuit on HRMS create — when employee_create is invoked
+    # with an existing eg_user.uuid (e.g. via the MCP REST shim's
+    # `existing_user_uuid` arg), HRMS attaches the employee record to
+    # the existing user instead of erroring DuplicateUserName.
+    # Without this image, every Phase-4-style employee create against
+    # an already-provisioned user (e.g. the city ADMIN city_setup
+    # creates) fails, leaving an orphan eg_user row + no HRMS row.
+    # The matching tag is what `docker-compose.egov-digit.yaml` uses;
+    # `deploy.yaml` was on an older tag (`hrms-boundary-0a4e737`)
+    # that has none of the above fixes.
+    # Image source resolved via:
+    #   registry.preview.egov.theflywheel.in/egovio/egov-hrms:digit-common-boundary-uuidlink
+    # `egovio/egov-hrms:digit-common-boundary-uuidlink` is the
+    # Docker-Hub-mirrored variant for stacks not on the Hetzner VPC.
+    image: egovio/egov-hrms:digit-common-boundary-uuidlink
     container_name: egov-hrms
     depends_on:
       pgbouncer:
@@ -574,6 +592,12 @@ services:
       STATE_LEVEL_TENANT_ID: pg
       EGOV_STATELEVEL_TENANT: pg
       HRMS_SYSTEM_USERNAME: INTERNAL_USER
+      # Required for the :digit-common-boundary-* HRMS images: when set,
+      # enrichUser() honours the password supplied in the create request
+      # instead of overwriting it with the default/auto-generated one
+      # (CCRS#482). Also skips the dev-mode SMS dispatch that requires
+      # SMS infra we don't have here.
+      EGOV_HRMS_DEV_MODE: "true"
     ports:
       - 18092:8092
     healthcheck:
