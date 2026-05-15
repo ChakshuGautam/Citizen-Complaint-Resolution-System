@@ -1950,6 +1950,41 @@ services:
     networks:
       - egov-network
 
+  # ─── OTP publisher (replaces Kong's /user-otp termination mock) ─────
+  # Generates a 6-digit OTP, caches it in Redis with a TTL, and emits
+  # an `OTP.SEND` event on `complaints.domain.events` for novu-bridge
+  # to deliver via Twilio. See local-setup/scripts/otp-publisher/README.md.
+  otp-publisher:
+    build:
+      context: ./scripts/otp-publisher
+    image: ${OTP_PUBLISHER_IMAGE:-otp-publisher:local}
+    container_name: otp-publisher
+    restart: unless-stopped
+    profiles: ["notifications"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    environment:
+      PORT: '3030'
+      REDIS_URL: redis://digit-redis:6379
+      KAFKA_BROKERS: redpanda:9092
+      EVENT_TOPIC: complaints.domain.events
+      OTP_TTL_SECONDS: ${OTP_TTL_SECONDS:-600}
+      DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID:-ke}
+      # Leave empty for real OTPs. Set to "123456" (or similar) for
+      # dev / CI to mirror egov-user's CITIZEN_LOGIN_PASSWORD_OTP_FIXED_VALUE.
+      STATIC_OTP: ${OTP_PUBLISHER_STATIC_OTP:-}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3030/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - egov-network
+
 networks:
   egov-network:
     driver: bridge

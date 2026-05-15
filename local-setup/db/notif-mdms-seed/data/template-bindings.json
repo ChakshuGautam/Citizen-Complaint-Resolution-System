@@ -1,0 +1,80 @@
+[
+  {
+    "schemaCode": "TemplateBinding",
+    "data": {
+      "tenantId": "{{TENANT}}",
+      "eventName": "COMPLAINTS.WORKFLOW.APPLY",
+      "channel": "sms",
+      "locale": "en_IN",
+      "templateId": "complaints-workflow-apply",
+      "contentSid": "",
+      "paramOrder": ["complaintNo", "status"],
+      "requiredVars": ["complaintNo"]
+    }
+  },
+  {
+    "schemaCode": "TemplateBinding",
+    "data": {
+      "tenantId": "{{TENANT}}",
+      "eventName": "COMPLAINTS.WORKFLOW.ASSIGN",
+      "channel": "sms",
+      "locale": "en_IN",
+      "templateId": "complaints-workflow-assign",
+      "contentSid": "",
+      "paramOrder": ["complaintNo", "status", "assigneeName"],
+      "requiredVars": ["complaintNo"]
+    }
+  },
+  {
+    "schemaCode": "TemplateBinding",
+    "data": {
+      "tenantId": "{{TENANT}}",
+      "eventName": "COMPLAINTS.WORKFLOW.RESOLVE",
+      "channel": "sms",
+      "locale": "en_IN",
+      "templateId": "complaints-workflow-resolve",
+      "contentSid": "",
+      "paramOrder": ["complaintNo", "status", "resolutionDetails"],
+      "requiredVars": ["complaintNo"]
+    }
+  },
+  {
+    "schemaCode": "TemplateBinding",
+    "data": {
+      "tenantId": "{{TENANT}}",
+      "eventName": "COMPLAINTS.WORKFLOW.REJECT",
+      "channel": "sms",
+      "locale": "en_IN",
+      "templateId": "complaints-workflow-reject",
+      "contentSid": "",
+      "paramOrder": ["complaintNo", "status", "rejectionReason"],
+      "requiredVars": ["complaintNo"]
+    }
+  },
+  {
+    "schemaCode": "TemplateBinding",
+    "data": {
+      "tenantId": "{{TENANT}}",
+      "eventName": "COMPLAINTS.WORKFLOW.REOPEN",
+      "channel": "sms",
+      "locale": "en_IN",
+      "templateId": "complaints-workflow-reopen",
+      "contentSid": "",
+      "paramOrder": ["complaintNo", "status"],
+      "requiredVars": ["complaintNo"]
+    }
+  },
+  {
+    "schemaCode": "TemplateBinding",
+    "data": {
+      "tenantId": "{{TENANT}}",
+      "eventName": "OTP.SEND",
+      "channel": "sms",
+      "locale": "en_IN",
+      "templateId": "otp-send",
+      "contentSid": "",
+      "paramOrder": ["otp", "userType"],
+      "requiredVars": ["otp"]
+    }
+  }
+]

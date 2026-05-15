@@ -117,23 +117,33 @@ services:
     strip_path: false
     methods:
     - POST
-- name: user-otp-mock
-  url: http://localhost:9999
+# OTP send + validate. When the `notifications` profile is enabled the
+# `otp-publisher` upstream is up and mints real OTPs that flow through
+# novu-bridge → Twilio. When notifications are off the upstream
+# (resolved by docker DNS) doesn't exist and Kong falls back to a 503;
+# operators can swap in the legacy `request-termination` mock by
+# uncommenting the plugin block below.
+- name: otp-publisher
+  url: http://otp-publisher:3030
   tags:
   - core
   - auth
-  - mock
   routes:
   - name: user-otp-route
     paths:
     - /user-otp
     strip_path: false
-  plugins:
-  - name: request-termination
-    config:
-      status_code: 200
-      content_type: application/json
-      body: '{"ResponseInfo":{"apiId":"Rainmaker","ver":".01","ts":"","resMsgId":"uief87324","msgId":"","status":"successful"},"otp":{"otp":"","UUID":"","isValidationSuccessful":true}}'
+  - name: otp-validate-route
+    paths:
+    - /otp/v1/_validate
+    strip_path: false
+  # Uncomment to revert to the legacy "always-200" mock (no Novu / no SMS):
+  # plugins:
+  # - name: request-termination
+  #   config:
+  #     status_code: 200
+  #     content_type: application/json
+  #     body: '{"ResponseInfo":{"apiId":"Rainmaker","ver":".01","ts":"","resMsgId":"uief87324","msgId":"","status":"successful"},"otp":{"otp":"","UUID":"","isValidationSuccessful":true}}'
 - name: enc-service
   url: http://egov-enc-service:1234
   tags:
@@ -467,24 +477,11 @@ services:
     paths:
     - /kc
     strip_path: true
-# OTP validate mock — returns success for citizen OTP login flow
-- name: otp-validate-mock
-  url: http://localhost:9999
-  tags:
-  - core
-  - auth
-  - mock
-  routes:
-  - name: otp-validate-route
-    paths:
-    - /otp
-    strip_path: false
-  plugins:
-  - name: request-termination
-    config:
-      status_code: 200
-      content_type: application/json
-      body: '{"ResponseInfo":{"apiId":"Rainmaker","ver":".01","ts":"","resMsgId":"uief87324","msgId":"","status":"successful"},"otp":{"otp":"","UUID":"","isValidationSuccessful":true}}'
+# OTP validate is handled by the `otp-publisher` upstream defined
+# alongside the `/user-otp` route at the top of this file — both
+# /user-otp/v1/_send AND /otp/v1/_validate go to the same service so
+# the cached OTP can be confirmed. The legacy `otp-validate-mock`
+# request-termination upstream is removed.
 # User event mock — returns empty events (service not deployed)
 - name: user-event-mock
   url: http://localhost:9999
