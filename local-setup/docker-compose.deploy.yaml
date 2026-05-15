@@ -754,6 +754,18 @@ services:
       KONG_STATUS_LISTEN: 0.0.0.0:8100
       KONG_MEM_CACHE_SIZE: 64m
       KONG_NGINX_WORKER_PROCESSES: 1
+      # kong.yml ships pre-function plugins that `require 'cjson'` for
+      # request/response shaping (see auth+routing blocks). Kong 3.x ships
+      # with an untrusted-lua sandbox enabled by default — `cjson` and
+      # `cjson.safe` aren't in the sandbox allow-list, so every plugin
+      # request 500s with:
+      #   init.lua:405 [pre-function] kong-lua-sandbox.lua:164: sandbox.lua:79:
+      #   require 'cjson' not allowed within sandbox
+      # Allowing both modules (and turning untrusted-lua on so the
+      # sandbox configuration applies) lets the existing kong.yml work
+      # unmodified.
+      KONG_UNTRUSTED_LUA: "on"
+      KONG_UNTRUSTED_LUA_SANDBOX_REQUIRES: "cjson,cjson.safe"
     volumes:
       - ./kong/kong.yml:/kong/kong.yml:ro
     ports:
