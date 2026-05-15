@@ -311,7 +311,15 @@ services:
       retries: 3
       start_period: 120s
     networks:
-      - egov-network
+      # kong.yml references `egov-user-proxy:8107` as the upstream for
+      # /user/* routes (4 routes). The proxy is a separate service in
+      # docker-compose.egov-digit.yaml; deploy.yaml is the leaner
+      # variant without it. Adding an alias here lets kong's DNS resolve
+      # to this container so the existing kong.yml works unmodified.
+      # Auth flows return `"name resolution failed"` without it.
+      egov-network:
+        aliases:
+          - egov-user-proxy
 
   egov-workflow-v2:
     image: egovio/egov-workflow-v2:v2.9.2-4a60f20
@@ -350,7 +358,12 @@ services:
       retries: 3
       start_period: 120s
     networks:
-      - egov-network
+      # kong.yml references `egov-workflow-proxy:8109` as the upstream
+      # for workflow routes (2 routes). Same pattern as egov-user above:
+      # alias-on-existing-service rather than adding the dedicated proxy.
+      egov-network:
+        aliases:
+          - egov-workflow-proxy
 
   egov-localization:
     image: egovio/egov-localization:v2.9.2-4a60f20
