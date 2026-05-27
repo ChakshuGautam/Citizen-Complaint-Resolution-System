@@ -102,11 +102,6 @@ services:
     command: postgres -c max_connections=200
     volumes:
     - postgres_data:/var/lib/docker-postgresql/data
-    # First-boot init: ensure the `keycloak` DB exists. Postgres only runs
-    # /docker-entrypoint-initdb.d/*.sql when PGDATA is empty, so this is
-    # idempotent (skipped on subsequent boots). Inert when enable_keycloak
-    # is false on the tenant — nothing else references the DB.
-    - ./db/keycloak-init.sql:/docker-entrypoint-initdb.d/02-keycloak-init.sql:ro
     ports:
     - 15432:5432
     healthcheck:
@@ -2063,14 +2058,40 @@ services:
   # Ansible playbook flips this on when `enable_keycloak: true` in
   # host_vars.
   #
-  # The base DB for Keycloak (the `keycloak` database) is created at
-  # Postgres first-boot via local-setup/db/keycloak-init.sql. The realm
-  # is rendered per-tenant by the playbook and imported via kcadm.sh
-  # (NOT via the `--import-realm` start flag, which only handles the
-  # static template that ships in the image).
+  # Keycloak has its OWN Postgres instance (keycloak-postgres) rather
+  # than sharing the DIGIT postgres-db. Two reasons:
+  #   1. Clean isolation: KC's Liquibase migrations don't entangle with
+  #      DIGIT's Flyway history; backups/restores are independent.
+  #   2. Works on every tenant: shared-Postgres init scripts only run on
+  #      first boot of an empty data dir. Tenants with live DIGIT data
+  #      wouldn't get the `keycloak` database auto-created — operators
+  #      would have to `psql -c "CREATE DATABASE keycloak"` manually.
+  #      Dedicated container sidesteps the whole problem.
+  # The realm is rendered per-tenant by the playbook and imported via
+  # kcadm.sh (NOT via the `--import-realm` start flag, which only
+  # handles the static template that ships in the image).
   #
   # Kong routes /auth → keycloak:8180 (strip_path:false) and /kc →
   # token-exchange-svc:3000 (strip_path:true) — see local-setup/kong/kong.yml.
+  keycloak-postgres:
+    image: postgres:16
+    container_name: keycloak-postgres
+    restart: unless-stopped
+    profiles: ["keycloak"]
+    environment:
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: ${KC_DB_PASSWORD:-keycloak}
+      POSTGRES_DB: keycloak
+    volumes:
+      - keycloak_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - egov-network
+
   keycloak:
     image: quay.io/keycloak/keycloak:24.0
     container_name: keycloak
@@ -2078,13 +2099,13 @@ services:
     profiles: ["keycloak"]
     command: ["start-dev", "--import-realm"]
     depends_on:
-      postgres-db:
+      keycloak-postgres:
         condition: service_healthy
     environment:
       KC_DB: postgres
-      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
-      KC_DB_USERNAME: ${POSTGRES_USER:-egov}
-      KC_DB_PASSWORD: ${KC_DB_PASSWORD:-${POSTGRES_PASSWORD:-egov123}}
+      KC_DB_URL: jdbc:postgresql://keycloak-postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${KC_DB_PASSWORD:-keycloak}
       KC_HOSTNAME_STRICT: 'false'
       KC_HOSTNAME_STRICT_HTTPS: 'false'
       KC_HTTP_ENABLED: 'true'
@@ -2170,5 +2191,6 @@ volumes:
   loki_data: null
   promtail_data: null
   mcp_postgres_data: null
+  keycloak_postgres_data: null
   openbao_data: null
   novu_mongo_data: null
