@@ -1,0 +1,74 @@
+[
+  {
+    "businessService": "PGR",
+    "fromState": null,
+    "action": "APPLY",
+    "toState": "PENDINGFORASSIGNMENT",
+    "subscribers": ["CITIZEN"],
+    "channels": ["SMS"],
+    "active": true
+  },
+  {
+    "businessService": "PGR",
+    "fromState": null,
+    "action": "ASSIGN",
+    "toState": "PENDINGATLME",
+    "subscribers": ["CITIZEN", "ASSIGNEE"],
+    "channels": ["SMS"],
+    "active": true
+  },
+  {
+    "businessService": "PGR",
+    "fromState": "PENDINGATLME",
+    "action": "REASSIGN",
+    "toState": "PENDINGFORREASSIGNMENT",
+    "subscribers": ["CITIZEN", "ASSIGNEE"],
+    "channels": ["SMS"],
+    "active": true
+  },
+  {
+    "businessService": "PGR",
+    "fromState": null,
+    "action": "REJECT",
+    "toState": "REJECTED",
+    "subscribers": ["CITIZEN"],
+    "channels": ["SMS"],
+    "active": true
+  },
+  {
+    "businessService": "PGR",
+    "fromState": "PENDINGATLME",
+    "action": "RESOLVE",
+    "toState": "RESOLVED",
+    "subscribers": ["CITIZEN"],
+    "channels": ["SMS"],
+    "active": true
+  },
+  {
+    "businessService": "PGR",
+    "fromState": null,
+    "action": "REOPEN",
+    "toState": "PENDINGFORASSIGNMENT",
+    "subscribers": ["CITIZEN", "ASSIGNEE"],
+    "channels": ["SMS"],
+    "active": true
+  },
+  {
+    "businessService": "PGR",
+    "fromState": "RESOLVED",
+    "action": "RATE",
+    "toState": "CLOSEDAFTERRESOLUTION",
+    "subscribers": ["ASSIGNEE"],
+    "channels": ["SMS"],
+    "active": true
+  },
+  {
+    "businessService": "PGR",
+    "fromState": "REJECTED",
+    "action": "RATE",
+    "toState": "CLOSEDAFTERREJECTION",
+    "subscribers": ["ASSIGNEE"],
+    "channels": ["SMS"],
+    "active": true
+  }
+]

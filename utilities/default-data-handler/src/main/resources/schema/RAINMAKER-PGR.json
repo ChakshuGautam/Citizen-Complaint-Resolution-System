@@ -230,5 +230,135 @@
       "x-ref-schema": [],
       "additionalProperties": false
     }
+  },
+  {
+    "tenantId": "{tenantid}",
+    "code": "RAINMAKER-PGR.NotificationRouting",
+    "description": "Config-driven notification routing (the 'who'). One record per workflow transition: for (businessService, action, toState) it declares which subscriber RELATIONSHIPS are notified and over which channels. Read by pgr-services NotificationRouter (cached) to replace the hardcoded if-chains in NotificationService/ComplaintDomainEventService. subscribers is a CLOSED relationship enum (NOT workflow RBAC roles). fromState is documentation-only — the Kafka consumer path matches on action+toState (it lacks fromState). Edited via the configurator.",
+    "isActive": true,
+    "definition": {
+      "type": "object",
+      "title": "PGR Notification Routing",
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "required": [
+        "businessService",
+        "action",
+        "toState",
+        "subscribers",
+        "channels"
+      ],
+      "x-unique": [
+        "businessService",
+        "action",
+        "toState"
+      ],
+      "properties": {
+        "businessService": {
+          "type": "string",
+          "description": "Workflow business service, e.g. PGR."
+        },
+        "fromState": {
+          "type": ["string", "null"],
+          "description": "Documentation/UI only. Runtime matching uses action+toState because the notification consumer reconstructs ServiceRequest from the Kafka record, which carries only the resulting applicationStatus (toState)."
+        },
+        "action": {
+          "type": "string",
+          "description": "Workflow action, e.g. ASSIGN, REASSIGN, REJECT, RESOLVE, REOPEN, RATE, APPLY."
+        },
+        "toState": {
+          "type": "string",
+          "description": "Resulting applicationStatus after the action, e.g. PENDINGATLME. Disambiguates same-action transitions (e.g. RATE -> CLOSEDAFTERRESOLUTION vs CLOSEDAFTERREJECTION)."
+        },
+        "subscribers": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Who is notified, as relationship codes resolved by pgr-services SubscriberResolver (NOT RBAC roles).",
+          "items": {
+            "type": "string",
+            "enum": ["CITIZEN", "ASSIGNEE", "CREATOR", "PREVIOUS_ASSIGNEE"]
+          }
+        },
+        "channels": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "enum": ["SMS", "WHATSAPP", "EMAIL"]
+          }
+        },
+        "active": {
+          "type": "boolean"
+        }
+      },
+      "x-ref-schema": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "tenantId": "{tenantid}",
+    "code": "RAINMAKER-PGR.NotificationTemplate",
+    "description": "Config-driven notification content (the 'what'). One record per (audience, action, toState, channel, locale) holding the message body PGR renders BEFORE publishing to Kafka. audience is the normalized recipient class (CITIZEN, or EMPLOYEE for any employee-type subscriber). Replaces the egov-localization PGR_<ROLE>_<ACTION>_<STATUS>_SMS_MESSAGE keys. Edited via the configurator.",
+    "isActive": true,
+    "definition": {
+      "type": "object",
+      "title": "PGR Notification Template",
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "required": [
+        "audience",
+        "action",
+        "toState",
+        "channel",
+        "locale",
+        "body"
+      ],
+      "x-unique": [
+        "audience",
+        "action",
+        "toState",
+        "channel",
+        "locale"
+      ],
+      "properties": {
+        "audience": {
+          "type": "string",
+          "enum": ["CITIZEN", "EMPLOYEE"],
+          "description": "Normalized recipient class. SubscriberResolver maps ASSIGNEE/CREATOR/PREVIOUS_ASSIGNEE -> EMPLOYEE, CITIZEN -> CITIZEN."
+        },
+        "action": {
+          "type": "string"
+        },
+        "toState": {
+          "type": "string"
+        },
+        "channel": {
+          "type": "string",
+          "enum": ["SMS", "WHATSAPP", "EMAIL"]
+        },
+        "locale": {
+          "type": "string",
+          "description": "e.g. en_IN, sw_KE."
+        },
+        "subject": {
+          "type": ["string", "null"],
+          "description": "EMAIL only; null for SMS/WHATSAPP."
+        },
+        "body": {
+          "type": "string",
+          "description": "Message body with {placeholder} tokens filled by pgr-services TemplateRenderer before Kafka publish."
+        },
+        "placeholders": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Declared {tokens} this body uses, e.g. id, complaint_type, citizen_name, emp_name, ulb, status, date, download_link, rating, additional_comments."
+        },
+        "active": {
+          "type": "boolean"
+        }
+      },
+      "x-ref-schema": [],
+      "additionalProperties": false
+    }
   }
 ]

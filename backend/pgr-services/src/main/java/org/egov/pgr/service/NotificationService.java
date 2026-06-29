@@ -8,7 +8,11 @@ import org.egov.common.contract.request.Role;
 import org.egov.common.contract.request.User;
 import org.egov.common.utils.MultiStateInstanceUtil;
 import org.egov.pgr.config.PGRConfiguration;
+import org.egov.pgr.producer.Producer;
 import org.egov.pgr.repository.ServiceRequestRepository;
+import org.egov.pgr.service.notification.NotificationRouter;
+import org.egov.pgr.service.notification.RoutingMatch;
+import org.egov.pgr.service.notification.TemplateRenderer;
 import org.egov.pgr.util.HRMSUtil;
 import org.egov.pgr.util.MDMSUtils;
 import org.egov.pgr.util.NotificationUtil;
@@ -62,7 +66,22 @@ public class NotificationService {
     @Autowired
     private MultiStateInstanceUtil centralInstanceUtil;
 
+    @Autowired
+    private NotificationRouter notificationRouter;
+
+    @Autowired
+    private TemplateRenderer templateRenderer;
+
+    @Autowired
+    private Producer producer;
+
     public void process(ServiceRequest request, String topic) {
+        // Config-driven path (MDMS NotificationRouting + NotificationTemplate). When the flag is
+        // off, fall through to the verbatim legacy behavior below.
+        if (Boolean.TRUE.equals(config.getNotificationConfigDriven())) {
+            processConfigDriven(request, topic);
+            return;
+        }
         try {
             log.info("request for notification :" + request);
             String tenantId = request.getService().getTenantId();
@@ -826,6 +845,269 @@ public class NotificationService {
             return countryCode + mobileNumber;
         }
         return mobileNumber;
+    }
+
+    // ==================== Config-driven notification path (MDMS-driven) ====================
+    // Replaces the legacy gate + 7 if-blocks: routing comes from RAINMAKER-PGR.NotificationRouting,
+    // bodies from RAINMAKER-PGR.NotificationTemplate. PGR renders+localizes here, then publishes ONE
+    // pre-rendered event per (recipient x channel) to complaints.domain.events. novu-bridge delivers.
+
+    private void processConfigDriven(ServiceRequest request, String topic) {
+        try {
+            String tenantId = request.getService().getTenantId();
+            String action = request.getWorkflow() != null ? request.getWorkflow().getAction() : null;
+            String toState = request.getService().getApplicationStatus();
+            if (!StringUtils.hasText(action) || !StringUtils.hasText(toState)) {
+                log.info("Config-driven notification skipped: missing action/toState for complaint {}",
+                        request.getService().getServiceRequestId());
+                return;
+            }
+            List<RoutingMatch> matches = notificationRouter.route(tenantId, PGR_MODULENAME, null, action, toState);
+            if (CollectionUtils.isEmpty(matches)) {
+                log.info("No notification routing for action={} toState={} tenant={}", action, toState, tenantId);
+                return;
+            }
+            String eventName = EVENT_NAME_PREFIX + action.toUpperCase(Locale.ROOT);
+            String locale = config.getNotificationDefaultLocale();
+            Map<String, String> values = buildPlaceholderValues(request);
+
+            Set<String> emitted = new HashSet<>();
+            for (RoutingMatch match : matches) {
+                for (String group : match.getSubscribers()) {
+                    ResolvedRecipient recipient;
+                    try {
+                        recipient = resolveRecipient(group, request);
+                    } catch (Exception ex) {
+                        log.error("Failed to resolve subscriber {} for complaint {}; skipping",
+                                group, request.getService().getServiceRequestId(), ex);
+                        continue;
+                    }
+                    if (recipient == null
+                            || (!StringUtils.hasText(recipient.phone) && !StringUtils.hasText(recipient.email))) {
+                        log.info("No contact for subscriber {} on complaint {}; skipping",
+                                group, request.getService().getServiceRequestId());
+                        continue;
+                    }
+                    String audience = SUBSCRIBER_CITIZEN.equals(group) ? AUDIENCE_CITIZEN : AUDIENCE_EMPLOYEE;
+                    for (String channel : match.getChannels()) {
+                        String dedupeKey = audience + "|" + channel + "|" + recipient.subscriberKey();
+                        if (!emitted.add(dedupeKey)) continue;
+                        try {
+                            String body = templateRenderer.render(tenantId, audience, action, toState,
+                                    channel, locale, values);
+                            if (body == null) continue;
+                            publishRenderedEvent(request, recipient, channel, eventName, action, toState, body);
+                        } catch (Exception ex) {
+                            log.error("Failed to render/publish {} for subscriber {} on complaint {}",
+                                    channel, group, request.getService().getServiceRequestId(), ex);
+                        }
+                    }
+                }
+            }
+        } catch (Exception ex) {
+            log.error("Error in config-driven notification processing for topic {}", topic, ex);
+        }
+    }
+
+    private ResolvedRecipient resolveRecipient(String group, ServiceRequest request) {
+        String tenantId = request.getService().getTenantId();
+        RequestInfo requestInfo = request.getRequestInfo();
+        String locale = config.getNotificationDefaultLocale();
+        switch (group) {
+            case SUBSCRIBER_CITIZEN: {
+                org.egov.pgr.web.models.User c = request.getService().getCitizen();
+                if (c == null) return null;
+                String uuid = StringUtils.hasText(c.getUuid()) ? c.getUuid() : request.getService().getAccountId();
+                String phone = buildMobileWithCountryCode(c.getMobileNumber(), c.getCountryCode());
+                return new ResolvedRecipient(uuid, AUDIENCE_CITIZEN, c.getName(), phone, c.getEmailId(), locale);
+            }
+            case SUBSCRIBER_ASSIGNEE:
+                return resolveAssignee(request, false);
+            case SUBSCRIBER_PREVIOUS_ASSIGNEE:
+                return resolveAssignee(request, true);
+            case SUBSCRIBER_CREATOR: {
+                String createdBy = request.getService().getAuditDetails() != null
+                        ? request.getService().getAuditDetails().getCreatedBy() : null;
+                if (!StringUtils.hasText(createdBy)) return null;
+                return toEmployeeRecipient(fetchUserByUUID(createdBy, requestInfo, tenantId), locale);
+            }
+            default:
+                return null;
+        }
+    }
+
+    private ResolvedRecipient resolveAssignee(ServiceRequest request, boolean previous) {
+        String tenantId = request.getService().getTenantId();
+        RequestInfo requestInfo = request.getRequestInfo();
+        String locale = config.getNotificationDefaultLocale();
+        // Current assignee from the live workflow (ASSIGN/REASSIGN transitions).
+        if (!previous && request.getWorkflow() != null
+                && !CollectionUtils.isEmpty(request.getWorkflow().getAssignes())
+                && StringUtils.hasText(request.getWorkflow().getAssignes().get(0))) {
+            ResolvedRecipient r = toEmployeeRecipient(
+                    fetchUserByUUID(request.getWorkflow().getAssignes().get(0), requestInfo, tenantId), locale);
+            if (r != null) return r;
+        }
+        // Fall back to the last ASSIGN in workflow history (REOPEN/RATE, or current resolution failed).
+        try {
+            ProcessInstance pi = getEmployeeName(tenantId, request.getService().getServiceRequestId(),
+                    requestInfo, ASSIGN);
+            if (pi != null && !CollectionUtils.isEmpty(pi.getAssignes())) {
+                User wu = pi.getAssignes().get(0);
+                if (StringUtils.hasText(wu.getUuid())) {
+                    ResolvedRecipient r = toEmployeeRecipient(
+                            fetchUserByUUID(wu.getUuid(), requestInfo, tenantId), locale);
+                    if (r != null) return r;
+                }
+                String phone = buildMobileWithCountryCode(wu.getMobileNumber(), null);
+                return new ResolvedRecipient(wu.getUuid(), AUDIENCE_EMPLOYEE, wu.getName(), phone, null, locale);
+            }
+        } catch (Exception e) {
+            log.warn("Failed to resolve assignee from workflow history for complaint {}",
+                    request.getService().getServiceRequestId(), e);
+        }
+        return null;
+    }
+
+    private ResolvedRecipient toEmployeeRecipient(org.egov.pgr.web.models.User u, String locale) {
+        if (u == null) return null;
+        String phone = buildMobileWithCountryCode(u.getMobileNumber(), u.getCountryCode());
+        return new ResolvedRecipient(u.getUuid(), AUDIENCE_EMPLOYEE, u.getName(), phone, u.getEmailId(), locale);
+    }
+
+    private Map<String, String> buildPlaceholderValues(ServiceRequest request) {
+        Map<String, String> v = new HashMap<>();
+        org.egov.pgr.web.models.Service service = request.getService();
+        String tenantId = service.getTenantId();
+        RequestInfo ri = request.getRequestInfo();
+        try {
+            String loc = notificationUtil.getLocalizationMessages(tenantId, ri, PGR_MODULE);
+            put(v, "id", service.getServiceRequestId());
+            if (StringUtils.hasText(service.getServiceCode()))
+                put(v, "complaint_type", notificationUtil.getCustomizedMsgForPlaceholder(loc,
+                        "pgr.complaint.category." + service.getServiceCode()));
+            if (StringUtils.hasText(service.getApplicationStatus()))
+                put(v, "status", notificationUtil.getCustomizedMsgForPlaceholder(loc,
+                        "CS_COMMON_" + service.getApplicationStatus()));
+            put(v, "download_link", notificationUtil.getShortnerURL(config.getMobileDownloadLink()));
+            put(v, "date", formatCreatedDate(service));
+            if (request.getWorkflow() != null) put(v, "additional_comments", request.getWorkflow().getComments());
+            if (service.getRating() != null) put(v, "rating", service.getRating().toString());
+            if (service.getCitizen() != null) put(v, "citizen_name", service.getCitizen().getName());
+        } catch (Exception e) {
+            log.warn("Failed building base placeholders for {}", service.getServiceRequestId(), e);
+        }
+        try {
+            String common = notificationUtil.getLocalizationMessages(tenantId, ri, COMMON_MODULE);
+            if (service.getAddress() != null && StringUtils.hasText(service.getAddress().getDistrict()))
+                put(v, "ulb", notificationUtil.getCustomizedMsgForPlaceholder(common,
+                        service.getAddress().getDistrict()));
+            try {
+                ArrayList<String> ao = JsonPath.parse(common)
+                        .read("$..messages[?(@.code==\"COMMON_MASTERS_DESIGNATION_AO\")].message");
+                if (ao != null && !ao.isEmpty()) put(v, "ao_designation", ao.get(0));
+            } catch (Exception ignore) { }
+        } catch (Exception e) {
+            log.warn("Failed building common placeholders for {}", service.getServiceRequestId(), e);
+        }
+        try {
+            ResolvedRecipient assignee = resolveRecipient(SUBSCRIBER_ASSIGNEE, request);
+            if (assignee != null && StringUtils.hasText(assignee.name)) put(v, "emp_name", assignee.name);
+        } catch (Exception ignore) { }
+        try {
+            Map<String, String> hrms = getHRMSEmployee(request);
+            if (hrms != null) {
+                put(v, "emp_department", hrms.get(DEPARTMENT));
+                put(v, "emp_designation", hrms.get(DESIGNATION));
+            }
+        } catch (Exception ignore) { }
+        return v;
+    }
+
+    private void put(Map<String, String> map, String key, String value) {
+        if (value != null) map.put(key, value);
+    }
+
+    private String formatCreatedDate(org.egov.pgr.web.models.Service service) {
+        if (service.getAuditDetails() == null || service.getAuditDetails().getCreatedTime() == null) return null;
+        Long t = service.getAuditDetails().getCreatedTime();
+        LocalDate date = Instant.ofEpochMilli(t > 10 ? t : t * 1000).atZone(ZoneId.systemDefault()).toLocalDate();
+        return date.format(DateTimeFormatter.ofPattern(DATE_PATTERN));
+    }
+
+    private void publishRenderedEvent(ServiceRequest request, ResolvedRecipient r, String channel,
+                                      String eventName, String action, String toState, String body) {
+        org.egov.pgr.web.models.Service service = request.getService();
+        String tenantId = service.getTenantId();
+        String subKey = r.subscriberKey();
+        if (!StringUtils.hasText(subKey)) {
+            log.warn("Skipping {} notification for complaint {}: no subscriberId (no uuid/mobile)",
+                    channel, service.getServiceRequestId());
+            return;
+        }
+        String subscriberId = tenantId + ":" + subKey;
+        String transactionId = String.join(":", service.getServiceRequestId(), action, toState, subscriberId, channel);
+
+        Map<String, Object> contact = new LinkedHashMap<>();
+        contact.put("userId", r.userUuid);
+        contact.put("type", r.type);
+        contact.put("name", r.name);
+        contact.put("phone", r.phone);
+        contact.put("email", r.email);
+        contact.put("locale", r.locale);
+
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("complaintNo", service.getServiceRequestId());
+        data.put("status", service.getApplicationStatus());
+        data.put("action", action);
+        data.put("toState", toState);
+
+        Map<String, Object> event = new LinkedHashMap<>();
+        event.put("eventId", UUID.randomUUID().toString());
+        event.put("eventType", "COMPLAINTS_WORKFLOW_TRANSITIONED");
+        event.put("eventName", eventName);
+        event.put("eventTime", Instant.now().toString());
+        event.put("producer", "complaints-service");
+        event.put("module", "Complaints");
+        event.put("entityType", "COMPLAINT");
+        event.put("entityId", service.getServiceRequestId());
+        event.put("tenantId", tenantId);
+        event.put("channel", channel);
+        event.put("subscriberId", subscriberId);
+        event.put("contact", contact);
+        event.put("renderedBody", body);
+        event.put("subject", null);
+        event.put("transactionId", transactionId);
+        event.put("data", data);
+
+        producer.push(tenantId, config.getComplaintsDomainEventsTopic(), event);
+        log.info("Published config-driven {} notification: complaint={} subscriber={} txn={}",
+                channel, service.getServiceRequestId(), subscriberId, transactionId);
+    }
+
+    /** Resolved notification target: who + how to reach them, for one subscriber relationship. */
+    private static class ResolvedRecipient {
+        final String userUuid;
+        final String type;   // CITIZEN | EMPLOYEE
+        final String name;
+        final String phone;
+        final String email;
+        final String locale;
+
+        ResolvedRecipient(String userUuid, String type, String name, String phone, String email, String locale) {
+            this.userUuid = userUuid;
+            this.type = type;
+            this.name = name;
+            this.phone = phone;
+            this.email = email;
+            this.locale = locale;
+        }
+
+        String subscriberKey() {
+            if (StringUtils.hasText(userUuid)) return userUuid;
+            if (StringUtils.hasText(phone)) return phone;
+            return null;
+        }
     }
 
 }

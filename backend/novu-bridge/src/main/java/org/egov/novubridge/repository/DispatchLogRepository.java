@@ -29,10 +29,13 @@ public class DispatchLogRepository {
             return;
         }
 
-        String sql = "INSERT INTO nb_dispatch_log(id, event_id, reference_number, module, event_name, tenant_id, channel, recipient_value, " +
+        // Idempotency key is (transaction_id, channel, recipient_value) — PGR emits
+        // one event per recipient x channel with a stable transactionId, so Kafka
+        // redelivery upserts the same row instead of duplicating a send.
+        String sql = "INSERT INTO nb_dispatch_log(id, event_id, transaction_id, reference_number, module, event_name, tenant_id, channel, recipient_value, " +
                 "template_key, template_version, status, attempt_count, last_error_code, last_error_message, provider_response_jsonb, " +
-                "created_time, last_modified_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS JSONB), ?, ?) " +
-                "ON CONFLICT (event_id, channel) DO UPDATE SET status=EXCLUDED.status, attempt_count=EXCLUDED.attempt_count, " +
+                "created_time, last_modified_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS JSONB), ?, ?) " +
+                "ON CONFLICT (transaction_id, channel, recipient_value) DO UPDATE SET status=EXCLUDED.status, attempt_count=EXCLUDED.attempt_count, " +
                 "last_error_code=EXCLUDED.last_error_code, last_error_message=EXCLUDED.last_error_message, " +
                 "provider_response_jsonb=EXCLUDED.provider_response_jsonb, last_modified_time=EXCLUDED.last_modified_time";
 
@@ -40,6 +43,7 @@ public class DispatchLogRepository {
             jdbcTemplate.update(sql,
                     entry.getId() != null ? entry.getId() : UUID.randomUUID(),
                     entry.getEventId(),
+                    entry.getTransactionId(),
                     entry.getReferenceNumber(),
                     entry.getModule(),
                     entry.getEventName(),

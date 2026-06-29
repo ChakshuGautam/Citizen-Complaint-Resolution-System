@@ -143,6 +143,10 @@ export const REGISTRY: Record<string, ResourceConfig> = {
   'auto-escalation-ignore': { type: 'mdms', label: 'Auto-Escalation Ignored',  schema: 'Workflow.AutoEscalationStatesToIgnore',    idField: 'businessService',   nameField: 'businessService' },
   'workflow-bs-master':     { type: 'mdms', label: 'Workflow BS Master',       schema: 'Workflow.BusinessServiceMasterConfig',     idField: 'active',            nameField: 'businessService' },
   'pgr-ui-constants':       { type: 'mdms', label: 'PGR UI Constants',         schema: 'RAINMAKER-PGR.UIConstants',                idField: 'REOPENSLA',         nameField: 'REOPENSLA' },
+  // Composite-key masters: react-admin id comes from the MDMS uniqueIdentifier
+  // (see mapMdmsRecord), so idField/nameField here are display-only.
+  'notification-routing':   { type: 'mdms', label: 'PGR Notification Routing',  schema: 'RAINMAKER-PGR.NotificationRouting',  idField: 'action', nameField: 'action' },
+  'notification-template':  { type: 'mdms', label: 'PGR Notification Templates', schema: 'RAINMAKER-PGR.NotificationTemplate', idField: 'action', nameField: 'action' },
 };
 
 export function getResourceConfig(resource: string): ResourceConfig | undefined {
