@@ -77,11 +77,12 @@ public class NotificationConfigDrivenEmissionTest {
         when(config.getComplaintsDomainEventsTopic()).thenReturn(TOPIC);
         when(config.getMobileDownloadLink()).thenReturn("http://app/download");
 
-        // Routing: CITIZEN over all three channels for ASSIGN -> PENDINGATLME.
+        // Routing: CITIZEN over all three channels for ASSIGN -> PENDINGATLME (one flat row per channel).
         when(notificationRouter.route(eq(TENANT), eq("PGR"), any(), eq("ASSIGN"), eq("PENDINGATLME")))
-                .thenReturn(Collections.singletonList(
-                        new RoutingMatch(Collections.singletonList("CITIZEN"),
-                                Arrays.asList("SMS", "WHATSAPP", "EMAIL"))));
+                .thenReturn(Arrays.asList(
+                        new RoutingMatch("CITIZEN", "SMS"),
+                        new RoutingMatch("CITIZEN", "WHATSAPP"),
+                        new RoutingMatch("CITIZEN", "EMAIL")));
 
         // Renderer returns a per-channel body so we can assert each channel was rendered+emitted.
         when(templateRenderer.render(anyString(), anyString(), anyString(), anyString(),
@@ -155,5 +156,79 @@ public class NotificationConfigDrivenEmissionTest {
         notificationService.process(assignRequest(), "save-pgr-request");
         verify(notificationRouter, org.mockito.Mockito.never())
                 .route(anyString(), anyString(), any(), anyString(), anyString());
+    }
+
+    /** Stub egov-user _search to return the given (uuid, mobile, email) users for a roleCodes query. */
+    @SuppressWarnings("unchecked")
+    private void stubRolePool(java.util.LinkedHashMap<String, Object>... users) {
+        when(config.getUserHost()).thenReturn("http://user/");
+        when(config.getUserSearchEndpoint()).thenReturn("user/_search");
+        when(config.getEgovInternalMicroserviceUserUuid()).thenReturn("internal-uuid");
+        java.util.LinkedHashMap<String, Object> response = new java.util.LinkedHashMap<>();
+        response.put("user", Arrays.asList(users));
+        when(serviceRequestRepository.fetchResult(any(StringBuilder.class), any()))
+                .thenReturn(response);
+    }
+
+    private java.util.LinkedHashMap<String, Object> userRow(String uuid, String name,
+                                                            String mobile, String email) {
+        java.util.LinkedHashMap<String, Object> m = new java.util.LinkedHashMap<>();
+        m.put("uuid", uuid);
+        m.put("name", name);
+        m.put("mobileNumber", mobile);
+        m.put("countryCode", "+254");
+        m.put("emailId", email);
+        m.put("createdDate", null);
+        return m;
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void roleAudience_fansOutToPool_oneEventPerPoolMember() {
+        // Routing: a single SMS row for role PGR_LME (a pool audience, not CITIZEN/EMPLOYEE).
+        when(notificationRouter.route(eq(TENANT), eq("PGR"), any(), eq("ASSIGN"), eq("PENDINGATLME")))
+                .thenReturn(Collections.singletonList(new RoutingMatch("PGR_LME", "SMS")));
+        // Pool has two members with valid contacts -> two events.
+        stubRolePool(
+                userRow("lme-1", "Officer One", "711111111", "one@gov.ke"),
+                userRow("lme-2", "Officer Two", "722222222", "two@gov.ke"));
+
+        notificationService.process(assignRequest(), "save-pgr-request");
+
+        ArgumentCaptor<Object> evt = ArgumentCaptor.forClass(Object.class);
+        verify(producer, times(2)).push(eq(TENANT), eq(TOPIC), evt.capture());
+
+        java.util.Set<String> subscribers = new java.util.HashSet<>();
+        for (Object o : evt.getAllValues()) {
+            Map<String, Object> e = (Map<String, Object>) o;
+            assertEquals("SMS", e.get("channel"));
+            assertEquals("BODY-SMS", e.get("renderedBody"));
+            Map<String, Object> contact = (Map<String, Object>) e.get("contact");
+            assertEquals("PGR_LME", contact.get("type"));
+            subscribers.add((String) e.get("subscriberId"));
+        }
+        assertEquals(new java.util.HashSet<>(Arrays.asList(TENANT + ":lme-1", TENANT + ":lme-2")),
+                subscribers);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void dedupe_collapsesDuplicateChannelSubscriber_acrossTwoRoles() {
+        // The same user holds two notified roles (PGR_LME and GRO), both over SMS. The user must
+        // get exactly ONE message per channel: dedupe key is (channel|subscriber), not audience.
+        when(notificationRouter.route(eq(TENANT), eq("PGR"), any(), eq("ASSIGN"), eq("PENDINGATLME")))
+                .thenReturn(Arrays.asList(
+                        new RoutingMatch("PGR_LME", "SMS"),
+                        new RoutingMatch("GRO", "SMS")));
+        // Both role searches return the same single user -> 2 matches but 1 emitted event.
+        stubRolePool(userRow("dual-role", "Dual Holder", "733333333", "dual@gov.ke"));
+
+        notificationService.process(assignRequest(), "save-pgr-request");
+
+        ArgumentCaptor<Object> evt = ArgumentCaptor.forClass(Object.class);
+        verify(producer, times(1)).push(eq(TENANT), eq(TOPIC), evt.capture());
+        Map<String, Object> e = (Map<String, Object>) evt.getValue();
+        assertEquals(TENANT + ":dual-role", e.get("subscriberId"));
+        assertEquals("SMS", e.get("channel"));
     }
 }

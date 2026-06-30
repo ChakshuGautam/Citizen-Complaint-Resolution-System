@@ -26,6 +26,8 @@ import {
   History,
   FileCode,
   Workflow,
+  Bell,
+  Mail,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -37,6 +39,13 @@ import { THEMES } from '@/themes';
 
 /** Sidebar navigation groups — names are i18n keys resolved at render time */
 const navGroups = [
+  {
+    labelKey: 'app.nav.notifications',
+    items: [
+      { id: 'notification-routing', nameKey: 'app.nav.notification_routing', path: '/manage/notification-routing', icon: Bell },
+      { id: 'notification-template', nameKey: 'app.nav.notification_templates', path: '/manage/notification-template', icon: Mail },
+    ],
+  },
   {
     labelKey: 'app.nav.tenant_management',
     items: [
@@ -141,7 +150,7 @@ export function DigitLayout({ children }: { children?: ReactNode }) {
             <div>
               <span className="font-condensed font-bold text-foreground">DIGIT</span>
               <span className="font-condensed font-medium text-muted-foreground ml-1">
-                Complaints Management
+                {translate('app.header.brand', { _: 'Complaints Management' })}
               </span>
             </div>
           )}
@@ -184,10 +193,10 @@ export function DigitLayout({ children }: { children?: ReactNode }) {
                   ? 'bg-primary/10 text-primary border-l-2 border-primary'
                   : 'text-muted-foreground hover:bg-muted hover:text-foreground'}
               `}
-              title={sidebarCollapsed ? 'PGR Dashboard' : undefined}
+              title={sidebarCollapsed ? translate('app.nav.pgr_dashboard') : undefined}
             >
               <BarChart3 className="w-5 h-5 flex-shrink-0" />
-              {!sidebarCollapsed && <span className="text-sm font-medium">PGR Dashboard</span>}
+              {!sidebarCollapsed && <span className="text-sm font-medium">{translate('app.nav.pgr_dashboard')}</span>}
             </button>
           </div>
 
@@ -290,7 +299,9 @@ export function DigitLayout({ children }: { children?: ReactNode }) {
                       `}
                     >
                       <span className="w-1.5 h-1.5 rounded-full bg-current opacity-40 flex-shrink-0" />
-                      <span className="text-xs font-medium truncate">{item.name}</span>
+                      <span className="text-xs font-medium truncate">
+                        {translate(`app.resources.${item.id.replace(/-/g, '_')}`, { _: item.name })}
+                      </span>
                     </button>
                   );
                 })}

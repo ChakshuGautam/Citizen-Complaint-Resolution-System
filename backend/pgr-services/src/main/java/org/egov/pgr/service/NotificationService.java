@@ -873,34 +873,45 @@ public class NotificationService {
 
             Set<String> emitted = new HashSet<>();
             for (RoutingMatch match : matches) {
-                for (String group : match.getSubscribers()) {
-                    ResolvedRecipient recipient;
-                    try {
-                        recipient = resolveRecipient(group, request);
-                    } catch (Exception ex) {
-                        log.error("Failed to resolve subscriber {} for complaint {}; skipping",
-                                group, request.getService().getServiceRequestId(), ex);
-                        continue;
-                    }
+                String audience = match.getAudience();
+                String channel = match.getChannel();
+                List<ResolvedRecipient> recipients;
+                try {
+                    recipients = resolveByAudience(audience, match.isAssigneeOnly(), request);
+                } catch (Exception ex) {
+                    log.error("Failed to resolve audience {} for complaint {}; skipping",
+                            audience, request.getService().getServiceRequestId(), ex);
+                    continue;
+                }
+                if (CollectionUtils.isEmpty(recipients)) {
+                    log.info("No recipients for audience {} on complaint {}; skipping",
+                            audience, request.getService().getServiceRequestId());
+                    continue;
+                }
+                String body = null;
+                boolean rendered = false;
+                for (ResolvedRecipient recipient : recipients) {
                     if (recipient == null
                             || (!StringUtils.hasText(recipient.phone) && !StringUtils.hasText(recipient.email))) {
-                        log.info("No contact for subscriber {} on complaint {}; skipping",
-                                group, request.getService().getServiceRequestId());
+                        log.info("No contact for a {} recipient on complaint {}; skipping",
+                                audience, request.getService().getServiceRequestId());
                         continue;
                     }
-                    String audience = SUBSCRIBER_CITIZEN.equals(group) ? AUDIENCE_CITIZEN : AUDIENCE_EMPLOYEE;
-                    for (String channel : match.getChannels()) {
-                        String dedupeKey = audience + "|" + channel + "|" + recipient.subscriberKey();
-                        if (!emitted.add(dedupeKey)) continue;
-                        try {
-                            String body = templateRenderer.render(tenantId, audience, action, toState,
+                    // Dedupe on (channel, subscriber): a user holding two notified roles gets ONE
+                    // message per channel. Audience is intentionally NOT part of the key.
+                    String dedupeKey = channel + "|" + recipient.subscriberKey();
+                    if (!emitted.add(dedupeKey)) continue;
+                    try {
+                        if (!rendered) {
+                            body = templateRenderer.render(tenantId, audience, action, toState,
                                     channel, locale, values);
-                            if (body == null) continue;
-                            publishRenderedEvent(request, recipient, channel, eventName, action, toState, body);
-                        } catch (Exception ex) {
-                            log.error("Failed to render/publish {} for subscriber {} on complaint {}",
-                                    channel, group, request.getService().getServiceRequestId(), ex);
+                            rendered = true;
                         }
+                        if (body == null) break; // template missing for this (audience,channel): skip whole row
+                        publishRenderedEvent(request, recipient, channel, eventName, action, toState, body);
+                    } catch (Exception ex) {
+                        log.error("Failed to render/publish {} for audience {} on complaint {}",
+                                channel, audience, request.getService().getServiceRequestId(), ex);
                     }
                 }
             }
@@ -909,39 +920,115 @@ public class NotificationService {
         }
     }
 
-    private ResolvedRecipient resolveRecipient(String group, ServiceRequest request) {
-        String tenantId = request.getService().getTenantId();
-        RequestInfo requestInfo = request.getRequestInfo();
+    /**
+     * Resolves a flattened-routing audience to its recipient list:
+     *   CITIZEN              -> [the complaint's citizen] (existing citizen extraction)
+     *   EMPLOYEE (alias)     -> [the assignee] (current workflow assignee, else last ASSIGN) or []
+     *   AUTO_ESCALATE/SYSTEM -> [] (non-notifiable; defensive — router already drops these)
+     *   any other role R     -> if (assigneeOnly && named assignee exists) -> [assignee]
+     *                           else the role POOL: all tenant users holding role R
+     */
+    private List<ResolvedRecipient> resolveByAudience(String audience, boolean assigneeOnly,
+                                                      ServiceRequest request) {
         String locale = config.getNotificationDefaultLocale();
-        switch (group) {
-            case SUBSCRIBER_CITIZEN: {
-                org.egov.pgr.web.models.User c = request.getService().getCitizen();
-                if (c == null) return null;
-                String uuid = StringUtils.hasText(c.getUuid()) ? c.getUuid() : request.getService().getAccountId();
-                String phone = buildMobileWithCountryCode(c.getMobileNumber(), c.getCountryCode());
-                return new ResolvedRecipient(uuid, AUDIENCE_CITIZEN, c.getName(), phone, c.getEmailId(), locale);
-            }
-            case SUBSCRIBER_ASSIGNEE:
-                return resolveAssignee(request, false);
-            case SUBSCRIBER_PREVIOUS_ASSIGNEE:
-                return resolveAssignee(request, true);
-            case SUBSCRIBER_CREATOR: {
-                String createdBy = request.getService().getAuditDetails() != null
-                        ? request.getService().getAuditDetails().getCreatedBy() : null;
-                if (!StringUtils.hasText(createdBy)) return null;
-                return toEmployeeRecipient(fetchUserByUUID(createdBy, requestInfo, tenantId), locale);
-            }
-            default:
-                return null;
+        if (AUDIENCE_CITIZEN.equalsIgnoreCase(audience)) {
+            org.egov.pgr.web.models.User c = request.getService().getCitizen();
+            if (c == null) return Collections.emptyList();
+            String uuid = StringUtils.hasText(c.getUuid()) ? c.getUuid() : request.getService().getAccountId();
+            String phone = buildMobileWithCountryCode(c.getMobileNumber(), c.getCountryCode());
+            return Collections.singletonList(
+                    new ResolvedRecipient(uuid, AUDIENCE_CITIZEN, c.getName(), phone, c.getEmailId(), locale));
         }
+        if (AUDIENCE_EMPLOYEE.equalsIgnoreCase(audience)) {
+            // Legacy alias -> the single assignee. Kept for backward compatibility.
+            ResolvedRecipient assignee = resolveAssignee(request);
+            return assignee == null ? Collections.emptyList() : Collections.singletonList(assignee);
+        }
+        if (AUDIENCE_AUTO_ESCALATE.equalsIgnoreCase(audience) || AUDIENCE_SYSTEM.equalsIgnoreCase(audience)) {
+            return Collections.emptyList();
+        }
+        // Any other audience is a role code. Pool by default; opt into assignee-only per row.
+        if (assigneeOnly) {
+            ResolvedRecipient assignee = resolveAssignee(request);
+            if (assignee != null) return Collections.singletonList(assignee);
+            // No named assignee -> fall through to the role pool rather than notifying no one.
+        }
+        return resolveUsersByRole(audience, request.getService().getTenantId(), request.getRequestInfo());
     }
 
-    private ResolvedRecipient resolveAssignee(ServiceRequest request, boolean previous) {
+    /**
+     * Resolves a role code to its tenant-wide POOL: every user holding {@code roleCode} in the
+     * tenant, via egov-user _search with a roleCodes filter, run as the internal SYSTEM user.
+     * Reuses the same user-search host/endpoint plumbing as {@link #fetchUserByUUID}. Recipients
+     * with neither phone nor email are dropped.
+     */
+    @SuppressWarnings("unchecked")
+    private List<ResolvedRecipient> resolveUsersByRole(String roleCode, String tenantId, RequestInfo ri) {
+        String locale = config.getNotificationDefaultLocale();
+        User userInfoCopy = ri.getUserInfo();
+        ri.setUserInfo(getInternalMicroserviceUser(tenantId));
+        List<ResolvedRecipient> out = new ArrayList<>();
+        try {
+            StringBuilder uri = new StringBuilder();
+            uri.append(config.getUserHost()).append(config.getUserSearchEndpoint());
+            Map<String, Object> userSearchRequest = new HashMap<>();
+            userSearchRequest.put("RequestInfo", ri);
+            userSearchRequest.put("tenantId", tenantId);
+            userSearchRequest.put("userType", "EMPLOYEE");
+            userSearchRequest.put("roleCodes", Collections.singletonList(roleCode));
+
+            LinkedHashMap<String, Object> responseMap =
+                    (LinkedHashMap<String, Object>) serviceRequestRepository.fetchResult(uri, userSearchRequest);
+            if (responseMap == null) return out;
+            List<LinkedHashMap<String, Object>> users =
+                    (List<LinkedHashMap<String, Object>>) responseMap.get("user");
+            if (CollectionUtils.isEmpty(users)) return out;
+            // Only contact fields are needed for notification; map a trimmed view so unrelated
+            // date fields (createdDate/dob) don't have to parse cleanly. Strip them defensively.
+            for (LinkedHashMap<String, Object> raw : users) {
+                org.egov.pgr.web.models.User u = mapContactUser(raw);
+                if (u == null) continue;
+                String phone = buildMobileWithCountryCode(u.getMobileNumber(), u.getCountryCode());
+                String email = u.getEmailId();
+                if (!StringUtils.hasText(phone) && !StringUtils.hasText(email)) continue;
+                String type = StringUtils.hasText(roleCode) ? roleCode : AUDIENCE_EMPLOYEE;
+                out.add(new ResolvedRecipient(u.getUuid(), type, u.getName(), phone, email, locale));
+            }
+        } catch (Exception e) {
+            log.error("Failed to resolve role pool '{}' for tenant {}", roleCode, tenantId, e);
+        } finally {
+            ri.setUserInfo(userInfoCopy);
+        }
+        return out;
+    }
+
+    /**
+     * Maps only the contact-relevant fields of a raw egov-user search row into a User. Avoids the
+     * full {@link #parseResponse} date conversion (createdDate/dob/etc.) which is irrelevant for
+     * notification recipients and brittle when those fields are absent or null.
+     */
+    private org.egov.pgr.web.models.User mapContactUser(Map<String, Object> raw) {
+        if (raw == null) return null;
+        org.egov.pgr.web.models.User u = new org.egov.pgr.web.models.User();
+        Object uuid = raw.get("uuid");
+        Object name = raw.get("name");
+        Object mobile = raw.get("mobileNumber");
+        Object countryCode = raw.get("countryCode");
+        Object email = raw.get("emailId");
+        if (uuid != null) u.setUuid(uuid.toString());
+        if (name != null) u.setName(name.toString());
+        if (mobile != null) u.setMobileNumber(mobile.toString());
+        if (countryCode != null) u.setCountryCode(countryCode.toString());
+        if (email != null) u.setEmailId(email.toString());
+        return u;
+    }
+
+    private ResolvedRecipient resolveAssignee(ServiceRequest request) {
         String tenantId = request.getService().getTenantId();
         RequestInfo requestInfo = request.getRequestInfo();
         String locale = config.getNotificationDefaultLocale();
         // Current assignee from the live workflow (ASSIGN/REASSIGN transitions).
-        if (!previous && request.getWorkflow() != null
+        if (request.getWorkflow() != null
                 && !CollectionUtils.isEmpty(request.getWorkflow().getAssignes())
                 && StringUtils.hasText(request.getWorkflow().getAssignes().get(0))) {
             ResolvedRecipient r = toEmployeeRecipient(
@@ -1011,7 +1098,8 @@ public class NotificationService {
             log.warn("Failed building common placeholders for {}", service.getServiceRequestId(), e);
         }
         try {
-            ResolvedRecipient assignee = resolveRecipient(SUBSCRIBER_ASSIGNEE, request);
+            List<ResolvedRecipient> assignees = resolveByAudience(AUDIENCE_EMPLOYEE, false, request);
+            ResolvedRecipient assignee = CollectionUtils.isEmpty(assignees) ? null : assignees.get(0);
             if (assignee != null && StringUtils.hasText(assignee.name)) put(v, "emp_name", assignee.name);
         } catch (Exception ignore) { }
         try {

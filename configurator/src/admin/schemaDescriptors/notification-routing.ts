@@ -5,24 +5,24 @@ import type { SchemaDescriptor } from './types';
 
 /**
  * Descriptor for `RAINMAKER-PGR.NotificationRouting` — config-driven "who is
- * notified" per workflow transition. One record per (businessService, action,
- * toState). Flat scalar key fields + two short enum arrays (subscribers,
- * channels) rendered as chip editors, so the generic form handles it with no
- * custom editor.
+ * notified" per workflow transition. FLATTENED: one record per
+ * (businessService, action, toState, audience, channel). Joins 1:1 with
+ * NotificationTemplate. Flat scalar fields only, so the generic form handles it
+ * with no custom editor.
  */
 export const notificationRoutingDescriptor: SchemaDescriptor = {
   schema: 'RAINMAKER-PGR.NotificationRouting',
   groups: [
     { title: 'Transition', fields: ['businessService', 'fromState', 'action', 'toState'] },
-    { title: 'Routing', fields: ['subscribers', 'channels', 'active'] },
+    { title: 'Routing', fields: ['audience', 'channel', 'active'] },
   ],
   fields: [
     { path: 'businessService', required: true, label: 'Business Service', help: 'Workflow business service, e.g. PGR.' },
     { path: 'fromState', label: 'From State', help: 'Documentation/UI only — runtime matches on action + toState (the consumer lacks fromState). Leave blank for "any".' },
     { path: 'action', required: true, label: 'Action', help: 'Workflow action, e.g. ASSIGN, REASSIGN, REJECT, RESOLVE, REOPEN, RATE, APPLY.' },
     { path: 'toState', required: true, label: 'To State', help: 'Resulting status, e.g. PENDINGATLME. Disambiguates same-action transitions (RATE -> CLOSEDAFTERRESOLUTION vs CLOSEDAFTERREJECTION).' },
-    { path: 'subscribers', widget: 'chip-array', required: true, label: 'Subscribers', help: 'Relationship codes (NOT RBAC roles): CITIZEN, ASSIGNEE, CREATOR, PREVIOUS_ASSIGNEE.' },
-    { path: 'channels', widget: 'chip-array', required: true, label: 'Channels', help: 'SMS, WHATSAPP, EMAIL.' },
+    { path: 'audience', required: true, label: 'Audience', help: 'CITIZEN or EMPLOYEE. CITIZEN -> the citizen; EMPLOYEE -> the assignee (current workflow assignee, else last ASSIGN from history).' },
+    { path: 'channel', required: true, label: 'Channel', help: 'SMS, WHATSAPP, EMAIL.' },
     { path: 'active', widget: 'boolean', label: 'Active' },
   ],
 };

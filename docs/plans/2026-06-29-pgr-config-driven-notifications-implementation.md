@@ -1,18 +1,20 @@
 # PGR Config-Driven Notifications — Implementation Plan
 
 **Date:** 2026-06-29
-**Status:** Implementation plan (engineering-ready)
+**Status:** BUILT — Phases 0–2 implemented in commit `ef8b617ec`; Bomet cut over (Phase 3) with SMS + Email live via Novu → Twilio / Gmail-SMTP and WhatsApp live via Baileys. This plan has been reconciled to the as-built system; deltas are flagged inline with **AS BUILT** notes and consolidated in [§9 As-built deltas](#9-as-built-deltas).
 **Branch:** `feat/pgr-notification-routing` (off `develop`)
 **Design:** [2026-06-29-pgr-config-driven-notifications-design.md](./2026-06-29-pgr-config-driven-notifications-design.md)
 **Target deploy:** Bomet (`ke.bomet`, `bometfeedbackhub.digit.org`)
 
-> Line references below were spot-checked against the source on `feat/pgr-notification-routing`. Where a cited line drifts by a few lines from what you see, the method/field name is the authoritative anchor. `NotificationService.process()` spans ~65–161; `getFinalMessage()` starts ~170.
+> **AS BUILT (the biggest delta):** the routing master was **fully flattened** — one MDMS row per `(businessService, action, toState, audience{CITIZEN|EMPLOYEE}, channel{SMS|WHATSAPP|EMAIL})`, joining **1:1** with `NotificationTemplate` (Bomet seed: 33 routing ↔ 33 templates). There is no `subscribers[]`/`channels[]` array and no `transitions[]` document; `audience` replaces `subscribers[]`, and routing/templates match on `action+toState`. WhatsApp delivery is **direct to baileys-send-service** (not through Novu) — the Novu-provider wrap is BACKLOG TASK-031 (CCRS#973) and the Novu→MDMS template sync is TASK-030 (CCRS#972).
+
+> Line references below predate the build and may drift from the source; the method/field name is the authoritative anchor.
 
 ---
 
 ## 1. Overview
 
-We are replacing PGR's three hardcoded notification decision points — the `NOTIFICATION_ENABLE_FOR_STATUS` gate (`NotificationService.java:74`), the 7 hardcoded `if (status && action)` blocks in `getFinalMessage()` (~170–531), and the transition-agnostic `ComplaintDomainEventService.getStakeholders()` (103–132) — with two cached MDMS masters: **`PGR.NotificationRouting`** (the "who": transition → subscriber relationships + channels) and **`PGR.NotificationTemplate`** (the "what": audience × eventName × channel × locale → body). All orchestration, rendering, and localization stay inside PGR (D1/D4); PGR pre-renders one event per `(recipient × channel)` to `complaints.domain.events`, and **novu-bridge becomes a thin pass-through delivery+tracking layer** that upserts Novu subscribers (identify, D6) and delivers the already-rendered body across SMS / email / WhatsApp. WhatsApp goes through a new self-hosted **Baileys send-service** (D7, free-form), because Novu has no Baileys integration. Everything is **behind a feature flag** (`pgr.notification.config.driven`, default off) with the legacy path retained one release; the Bomet seed reproduces current SMS behavior exactly so cutover is a behavioral no-op (D8), guarded by a **golden-output backward-compat test** that is the real gate.
+We are replacing PGR's three hardcoded notification decision points — the `NOTIFICATION_ENABLE_FOR_STATUS` gate, the 7 hardcoded `if (status && action)` blocks in `getFinalMessage()`, and the transition-agnostic `ComplaintDomainEventService.getStakeholders()` — with two cached MDMS masters: **`RAINMAKER-PGR.NotificationRouting`** (the "who") and **`RAINMAKER-PGR.NotificationTemplate`** (the "what"). **AS BUILT, both are fully flattened scalar-row masters:** routing is one row per `(businessService, action, toState, audience, channel)` (audience ∈ {CITIZEN, EMPLOYEE}, channel ∈ {SMS, WHATSAPP, EMAIL}); each row joins 1:1 with a template keyed `(audience, action, toState, channel, locale)`. All orchestration, rendering, and localization stay inside PGR (D1/D4); PGR pre-renders one event per `(recipient × channel)` to `complaints.domain.events`, and **novu-bridge is a thin pass-through delivery+tracking layer**: for SMS/Email it upserts the Novu subscriber (identify, D6) then triggers the per-channel Novu workflow (`complaints-sms`/`complaints-email`) which delivers via the Novu provider (**Twilio** / **Gmail-SMTP nodemailer**); for WhatsApp it POSTs directly to the new self-hosted **baileys-send-service** (D7, free-form), because Novu has no Baileys integration. Everything is **behind a feature flag** (`pgr.notification.config.driven`, default off) with the legacy path retained one release; the Bomet seed reproduces current behavior so cutover is behaviorally a no-op (D8), guarded by a **golden-output backward-compat test**.
 
 **Dependency order across components** (each strictly depends on the prior for an end-to-end pass):
 
@@ -42,70 +44,67 @@ Phase 0 and the early parts of Phase 1 can proceed in parallel (PGR code can be 
 
 Goal: both masters are authored, registered as schemas, seeded on Bomet to reproduce §11, and editable in the configurator. **No code yet flips on**; this defines the contract every later phase codes against.
 
-**P0-1. Author the two MDMS schemas (draft-07) in the default-data-handler.**
-- File: `utilities/default-data-handler/src/main/resources/schema/RAINMAKER-PGR.json` — append two array elements after `RAINMAKER-PGR.ComplaintHierarchy` (ends ~line 233): `RAINMAKER-PGR.NotificationRouting` and `RAINMAKER-PGR.NotificationTemplate`, each as `{tenantId:'{tenantid}', code, description, isActive:true, definition:{...}}`.
-- `NotificationRouting.definition`: `required:[businessService,transitions]`, `x-unique:[businessService]`, `transitions[]` items require `[action,toState,subscribers,channels]`, `fromState` optional (`type:["string","null"]`), `subscribers.items.enum=[CITIZEN,ASSIGNEE,CREATOR,PREVIOUS_ASSIGNEE]` (D3), `channels.items.enum=[SMS,WHATSAPP,EMAIL]`, `additionalProperties:false`.
-- `NotificationTemplate.definition`: `required:[code,audience,eventName,channel,locale,body]`, `x-unique:[code]` (single-string synthetic key, see P0-5), `audience.enum=[CITIZEN,EMPLOYEE]`, `channel.enum=[SMS,WHATSAPP,EMAIL]`, `placeholders:[string]`, `additionalProperties:false`.
-- **Acceptance:** `RAINMAKER-PGR.json` is valid JSON (array); both objects parse; enums match D3 + channel set.
+**P0-1. Author the two MDMS schemas (draft-07) in the default-data-handler.** — DONE.
+- File: `utilities/default-data-handler/src/main/resources/schema/RAINMAKER-PGR.json` — appended two array elements after `RAINMAKER-PGR.ComplaintHierarchy`: `RAINMAKER-PGR.NotificationRouting` and `RAINMAKER-PGR.NotificationTemplate`, each as `{tenantId:'{tenantid}', code, description, isActive:true, definition:{...}}`.
+- **AS BUILT — flattened scalar schemas, NOT nested `transitions[]`:**
+  - `NotificationRouting.definition`: `required:[businessService,action,toState,audience,channel]`, `x-unique:[businessService,action,toState,audience,channel]`, `audience.enum=[CITIZEN,EMPLOYEE]` (D3), `channel.enum=[SMS,WHATSAPP,EMAIL]`, `fromState` doc-only (`type:["string","null"]`), `active:boolean`, `additionalProperties:false`. No `transitions[]`, no `subscribers[]`/`channels[]` arrays.
+  - `NotificationTemplate.definition`: `required:[audience,action,toState,channel,locale,body]`, `x-unique:[audience,action,toState,channel,locale]` (composite key — no synthetic `code` field was needed), `audience.enum=[CITIZEN,EMPLOYEE]`, `channel.enum=[SMS,WHATSAPP,EMAIL]`, `subject:["string","null"]`, `placeholders:[string]`, `active:boolean`, `additionalProperties:false`.
+- **AS-BUILT CORRECTION:** the schema `description` column in MDMS is **≤ 512 chars** — both descriptions were written under that (264 / 380 chars).
+- **Acceptance:** `RAINMAKER-PGR.json` is valid JSON (array); both objects parse; enums match D3 + channel set; descriptions ≤ 512 chars.
 
 **P0-2. Register the schema codes authoritatively.**
 - File: `utilities/default-data-handler/src/main/resources/application.properties` — append `,RAINMAKER-PGR.NotificationRouting,RAINMAKER-PGR.NotificationTemplate` to `default.mdms.schema.create.list` (line 54) and to the PGR entry in `mdms.schemacode.map` (line 55). (Note: `createMdmsSchemaFromFile` already globs `classpath:schema/*.json` — `DataHandlerService.java:232` — so registration also happens implicitly; the list keeps it authoritative.)
 - **Acceptance:** schema setup on a fresh tenant creates both schemas; `mdms_schema_search` returns them.
 
-**P0-3. Author parity schema copies for nairobi-mdms-driven tenants.**
-- New files: `local-setup/ansible/nairobi-mdms/mdms/schemas/RAINMAKER-PGR/NotificationRouting.json` and `.../NotificationTemplate.json` (single schema object each, `tenantId:'ke'`), mirroring the existing `ServiceDefs.json`/`UIConstants.json` single-schema-per-file convention. **Bomet is the default-data-handler path (P0-1) is primary**; this is the Nairobi parity copy.
-- **Acceptance:** files validate; match the P0-1 definitions field-for-field.
+**P0-3. Schema parity for nairobi-mdms tenants.** — N/A as built.
+- The masters ship from `default-data-handler` (P0-1) with `tenantId:'{tenantid}'` substitution; that is the single source. No separate `nairobi-mdms/.../RAINMAKER-PGR/Notification*.json` parity files were created.
 
-**P0-4. Confirm tenant scoping level (design §4.3 open item — BLOCKS the seed path).**
-- Verify against the live Bomet box which tenant level `MDMSUtils.getNotificationRouting(serviceTenantId)` resolves: service tenantId is `ke.bomet`; MDMS v2 inheritance returns root-inherited data. Use `mcp__DIGIT-*__mdms_search` / `mdms_schema_search` against Bomet (or replicate `mDMSCall`'s root-fallback in the fetch — see P1-2).
-- **Acceptance:** a documented decision: seed at `ke.bomet` (default) and/or `ke`. The seed file path (`mdms/data/ke/bomet/...` vs `mdms/data/ke/...`) is set accordingly.
+**P0-4. Confirm tenant scoping level.** — DONE: **seed at the state-level tenant `ke`.**
+- **AS BUILT:** `MDMSUtils.getNotificationRouting/getNotificationTemplates` resolve via `MultiStateInstanceUtil.getStateLevelTenant(tenantId)` — i.e. they cache + query at `ke` (root of `ke.bomet`). The `{tenantid}`-substituted seed lands at that state root, so PGR reads it. No `ke.bomet`-level seed is needed.
 
-**P0-5. Seed `PGR.NotificationRouting` on Bomet (one doc, businessService=PGR).**
-- New file: `local-setup/ansible/nairobi-mdms/mdms/data/ke/bomet/RAINMAKER-PGR/NotificationRouting.json` — ONE record, `uniqueIdentifier:"PGR"`, `transitions[]` = the §11 behavior table **validated against `PgrWorkflowConfig.json`**:
-  - APPLY→PENDINGFORASSIGNMENT: `[CITIZEN]`
-  - ASSIGN (from PENDINGFORASSIGNMENT)→PENDINGATLME: `[CITIZEN,ASSIGNEE]`
-  - ASSIGN (from PENDINGFORREASSIGNMENT)→PENDINGATLME: `[CITIZEN,ASSIGNEE]`
-  - **REASSIGN: fromState=PENDINGATLME→PENDINGFORREASSIGNMENT** `[CITIZEN,ASSIGNEE]` (the real reassign)
-  - REJECT→REJECTED (from both PENDINGFORASSIGNMENT and PENDINGFORREASSIGNMENT): `[CITIZEN]`
-  - RESOLVE→RESOLVED: `[CITIZEN]`
-  - REOPEN→PENDINGFORASSIGNMENT (from REJECTED and from RESOLVED): `[CITIZEN,PREVIOUS_ASSIGNEE]`
-  - RATE→CLOSEDAFTERRESOLUTION and RATE→CLOSEDAFTERREJECTION: `[PREVIOUS_ASSIGNEE]`
-  - **All rows `channels:["SMS"]` ONLY** (reproduce current behavior exactly, D8). WHATSAPP/EMAIL added post-cutover as config-only edits.
-  - **EXCLUDE the ghost row** §11 `PENDINGFORREASSIGNMENT·REASSIGN` — no such transition in `PgrWorkflowConfig.json` (PENDINGFORREASSIGNMENT has only COMMENT/REJECT/ASSIGN).
-- **Acceptance:** every seeded row has a matching real transition in `PgrWorkflowConfig.json`; no ghost rows; channels SMS-only; loaded via the seed path chosen in P0-4 (`MdmsBulkLoader` derives schemaCode from filename, tenantId from dir).
+**P0-5. Seed `RAINMAKER-PGR.NotificationRouting` (flattened, one row per audience×channel).** — DONE.
+- File AS BUILT: `utilities/default-data-handler/src/main/resources/mdmsData-dev/RAINMAKER-PGR/RAINMAKER-PGR.NotificationRouting.json` — a **JSON array of 33 scalar rows**, each `{businessService:"PGR", fromState, action, toState, audience, channel, active}`. NOT a single `transitions[]` document. Derived from §11 **validated against `PgrWorkflowConfig.json`**, then crossed with all three channels:
+  - APPLY→PENDINGFORASSIGNMENT: CITIZEN
+  - ASSIGN→PENDINGATLME: CITIZEN + EMPLOYEE
+  - **REASSIGN: fromState=PENDINGATLME→PENDINGFORREASSIGNMENT** CITIZEN + EMPLOYEE
+  - REJECT→REJECTED: CITIZEN
+  - RESOLVE→RESOLVED (fromState=PENDINGATLME): CITIZEN
+  - REOPEN→PENDINGFORASSIGNMENT: CITIZEN + EMPLOYEE
+  - RATE→CLOSEDAFTERRESOLUTION (fromState=RESOLVED) and RATE→CLOSEDAFTERREJECTION (fromState=REJECTED): EMPLOYEE
+  - **AS BUILT: all three channels {SMS, WHATSAPP, EMAIL} seeded** for every active transition (not SMS-only) — that is why the seed is 33 rows. The cutover relies on the golden test for SMS parity; WHATSAPP/EMAIL are net-new.
+  - **EXCLUDE the ghost row** `PENDINGFORREASSIGNMENT·REASSIGN` — no such transition in `PgrWorkflowConfig.json`.
+- **Acceptance:** every seeded row has a matching real transition; no ghost rows; loaded by `MdmsBulkLoader` (schemaCode from filename, tenantId from `{tenantid}`).
 
-**P0-6. Seed `PGR.NotificationTemplate` on Bomet (one record per audience×eventName×channel×locale).**
-- New file: `local-setup/ansible/nairobi-mdms/mdms/data/ke/bomet/RAINMAKER-PGR/NotificationTemplate.json` — bodies lifted **verbatim** from the existing `rainmaker-pgr.json` `PGR_*_SMS_MESSAGE` keys via the **curated mapping** (NOT `split('_')` — multi-token statuses `CLOSEDAFTERRESOLUTION`/`CLOSEDAFTERREJECTION` and the role/action-swapped + `CLOSE`-vs-`RATE` variant keys break naive parsing). Each record gets a synthetic single-string `code` (e.g. `CITIZEN_ASSIGN_SMS_en_IN`) as the `x-unique` key.
-  - CITIZEN templates: APPLY, ASSIGN, REASSIGN, REJECT, REOPEN, RESOLVE (6).
-  - EMPLOYEE templates: ASSIGN, REASSIGN, REOPEN, RATE (4). Collapse the duplicate RATE keys (3 legacy → 1) and REASSIGN keys (6 legacy → 1 CITIZEN + 1 EMPLOYEE).
-  - `eventName = COMPLAINTS.WORKFLOW.<ACTION>`.
-  - **FLAG:** the legacy `PGR_DEFAULT_CITIZEN` "default message" appended after every citizen body (`NotificationService` ~527) is intentionally NOT migrated as a template row — verify against the golden-output test (P1-9) that dropping the default-suffix does not silently drop a second SMS.
-- **Acceptance:** every §11 (audience,eventName,channel,locale) tuple that the routing seed references has a matching template record; bodies byte-identical to legacy; curated mapping documented inline.
+**P0-6. Seed `RAINMAKER-PGR.NotificationTemplate` (one row per audience×action×toState×channel×locale).** — DONE.
+- File AS BUILT: `utilities/default-data-handler/src/main/resources/mdmsData-dev/RAINMAKER-PGR/RAINMAKER-PGR.NotificationTemplate.json` — a **JSON array of 33 rows**, each `{audience, action, toState, channel, locale:"en_IN", subject, body, placeholders[], active}`, joining 1:1 with the routing rows. SMS bodies lifted from the legacy `rainmaker-pgr.json` `PGR_*_SMS_MESSAGE` keys via the **curated mapping** (NOT `split('_')`); WHATSAPP/EMAIL bodies adapted from the SMS body. **No synthetic `code` field** — the composite `(audience,action,toState,channel,locale)` is the `x-unique` key. Migration helper: `utilities/default-data-handler/scripts/migrate-pgr-sms-templates.py`.
+  - 18 CITIZEN rows (APPLY, ASSIGN, REASSIGN, REJECT, RESOLVE, REOPEN × 3 channels) + 15 EMPLOYEE rows (ASSIGN, REASSIGN, REOPEN, RATE→CLOSEDAFTERRESOLUTION, RATE→CLOSEDAFTERREJECTION × 3 channels).
+  - **Note:** the legacy `PGR_DEFAULT_CITIZEN` suffix was NOT migrated as a row — gated by the golden-output test (P1-9).
+- **Acceptance:** every routing row has a matching template row (0 missing / 0 orphan); SMS bodies byte-identical to legacy for the golden test.
 
-**P0-7. Configurator: register both resources.**
-- File: `configurator/packages/data-provider/src/providers/resourceRegistry.ts` — after the `pgr-ui-constants` entry (~line 145) add:
-  - `'notification-template': { type:'mdms', label:'Notification Templates', schema:'RAINMAKER-PGR.NotificationTemplate', idField:'code', nameField:'eventName', descriptionField:'body' }`
-  - `'notification-routing': { type:'mdms', label:'Notification Routing', schema:'RAINMAKER-PGR.NotificationRouting', idField:'businessService', nameField:'businessService' }`
-- **Acceptance:** both appear in the configurator's generic MDMS resource list; `notification-template` (flat fields) gets working List/Show/Edit/Create automatically.
+**P0-7. Configurator: register both resources.** — DONE.
+- File: `configurator/packages/data-provider/src/providers/resourceRegistry.ts` — added (AS BUILT, `idField`/`nameField` = `action` since the seed has no `code`/`eventName` field):
+  - `'notification-routing':  { type:'mdms', label:'PGR Notification Routing',  schema:'RAINMAKER-PGR.NotificationRouting',  idField:'action', nameField:'action' }`
+  - `'notification-template': { type:'mdms', label:'PGR Notification Templates', schema:'RAINMAKER-PGR.NotificationTemplate', idField:'action', nameField:'action' }`
+- **Acceptance:** both appear in the configurator's MDMS resource list with working List/Show/Edit/Create.
 
-**P0-8. Configurator: friendly form for `NotificationTemplate` (no custom editor needed — all scalar/string[]).**
-- New file: `configurator/src/admin/schemaDescriptors/notification-template.ts` — descriptor with groups `{Key:[code,audience,eventName,channel,locale]}`, `{Content:[subject,body,placeholders]}`; `body→'textarea'`, `placeholders→'chip-array'`.
-- File: `configurator/src/admin/schemaDescriptors/index.ts` — import + register in `DESCRIPTORS` keyed by schema.
-- **Acceptance:** Create/Edit renders body as multiline and placeholders as chips; save persists via the generic provider (`POST /v2/_create|_update/{schemaCode}`).
+**P0-8. Configurator: friendly form for `NotificationTemplate` (all scalar/string[] — no custom editor).** — DONE.
+- File: `configurator/src/admin/schemaDescriptors/notification-template.ts` — descriptor groups `{Key:[audience,action,toState,channel,locale]}`, `{Content:[subject,body,placeholders,active]}`; `body→'textarea'`, `placeholders→'chip-array'`. **AS BUILT the key is `(audience,action,toState,channel,locale)`** — there is no `code` or `eventName` field.
+- File: `configurator/src/admin/schemaDescriptors/index.ts` — import + register both descriptors.
+- **Acceptance:** Create/Edit renders body as multiline and placeholders as chips; save persists via the generic provider.
 
-**P0-9. Configurator: custom editor for `NotificationRouting` (transitions[] is array-of-objects — generic engine SKIPS it and has a documented submit-swallow bug).**
-- New file: `configurator/src/admin/themeEditor/TransitionRoutingEditor.tsx` — modeled on `StateInfoEditor.tsx`; renders businessService scalar + an editable table for `transitions[]` (fromState, action, toState, multi-select subscribers from the closed enum, multi-select channels), saves via `digitClient.mdmsUpdate()/mdmsCreate()` directly (bypassing the generic save).
-- New file: `configurator/src/admin/schemaDescriptors/notification-routing.ts` — descriptor with `customEditor:'notification-routing'`.
+**P0-9. Configurator: `NotificationRouting` form.** — DONE (no custom editor; flattened model made the planned array-of-objects editor unnecessary).
+- **AS BUILT — NO custom editor needed.** Because routing was flattened to scalar fields (audience/channel are scalars, not arrays), the generic schema-driven datagrid handles List/Show/Edit/Create. The planned `TransitionRoutingEditor.tsx` / `customEditor` wiring was **not built**.
+- File: `configurator/src/admin/schemaDescriptors/notification-routing.ts` — plain descriptor grouping `{Transition:[businessService,fromState,action,toState]}`, `{Routing:[audience,channel,active]}` (scalar fields only, no chip-arrays).
 - File: `configurator/src/admin/schemaDescriptors/index.ts` — register `notificationRoutingDescriptor`.
-- File: `configurator/src/admin/themeEditor/index.ts` — `customEditors['notification-routing'] = TransitionRoutingEditor` (mirrors the `'state-info'` entry; `MdmsResourceEdit.tsx:77` looks it up).
-- **Acceptance:** routing transitions[] are inline-editable (add/remove rows, enum-constrained selects) and persist; reload shows the saved rows. Subscriber/channel choices sourced from the fetched schema's `items.enum` (avoid hardcode drift).
+- **Acceptance:** routing rows are inline-editable scalar fields and persist via the generic provider; reload shows the saved rows.
 
-**P0-10. Configurator: navigation + i18n (recommended, optional for MVP since both auto-list under "Advanced").**
-- File: `configurator/src/admin/DigitLayout.tsx` — add two items to the `complaint_management` group (`Bell`/`MessageSquare` icons from lucide-react), paths `/manage/notification-routing` and `/manage/notification-template`.
-- File: `configurator/src/providers/i18nProvider.ts` — add `app.nav.notification_routing` / `app.nav.notification_templates`.
-- **Acceptance:** both appear as first-class nav items with translated labels.
+**P0-10. Configurator: navigation + i18n.** — DONE.
+- **AS BUILT:** a new **top-level `Notifications` nav group** was added (not under `complaint_management`), with two items `Notification Routing` (`Bell`) and `Notification Templates` (`Mail`), paths `/manage/notification-routing` and `/manage/notification-template`, in `configurator/src/admin/DigitLayout.tsx`.
+- File: `configurator/src/providers/i18nProvider.ts` — added `app.nav.notifications`, `app.nav.notification_routing`, `app.nav.notification_templates`.
+- The configurator is built via `local-setup/ansible/files/configurator-build.sh`: **build each `file:` sub-package first** (their `package.json main` points at `dist/`, which `npm install` does not build), then `npx vite build --base=/configurator/`.
+- **Acceptance:** both appear as first-class nav items under "Notifications" with translated labels.
 
-**Phase 0 exit criteria:** schemas registered on Bomet; both masters seeded reproducing §11 (SMS-only); configurator renders+edits both (routing via custom editor); tenant scoping level confirmed (P0-4).
+**Phase 0 exit criteria:** schemas registered (default-data-handler); both masters seeded (33 ↔ 33) at `ke`; configurator renders+edits both via the generic datagrid; tenant scoping confirmed at `ke` (P0-4).
 
 ---
 
@@ -126,40 +125,37 @@ Goal: PGR reads both masters and emits pre-rendered per-recipient events behind 
 - File: `backend/pgr-services/src/main/resources/application.properties` — near the notification block (~96–104): `pgr.notification.config.driven=false`, `pgr.notification.default.locale=en_IN`, `pgr.notification.channels.default=SMS`. Leave legacy props untouched.
 - **Acceptance:** flag defaults off; legacy gate props intact.
 
-**P1-4. New class `NotificationRouter` (the "who").**
-- New file: `backend/pgr-services/src/main/java/org/egov/pgr/service/notification/NotificationRouter.java` — `route(tenantId, businessService, fromState, action, toState) → List<RoutingMatch>` where `RoutingMatch{List<String> subscribers; List<String> channels}`. Reads `mdmsUtils.getNotificationRouting(tenantId)`, matches transitions on `action+toState` (fromState optional: match when null OR equal), validates subscribers against the closed enum (skip+log unknowns). Empty list ⇒ no notification (replaces the `NOTIFICATION_ENABLE_FOR_STATUS` gate).
-- **Acceptance:** covered by `NotificationRouterTest` (P1-7).
+**P1-4. New class `NotificationRouter` (the "who").** — DONE.
+- New file: `backend/pgr-services/src/main/java/org/egov/pgr/service/notification/NotificationRouter.java` — `route(tenantId, businessService, fromState, action, toState) → List<RoutingMatch>`. Reads `mdmsUtils.getNotificationRouting(tenantId)`, matches rows on `action+toState` (fromState optional). Empty list ⇒ no notification (replaces the `NOTIFICATION_ENABLE_FOR_STATUS` gate).
+- **AS-BUILT NOTE:** `RoutingMatch` still carries `List<String> subscribers; List<String> channels`, a holdover from the pre-flatten array model. The **deployed MDMS rows are flat scalar `(audience, channel)`** (P0-1/P0-5) and `NotificationService.processConfigDriven` already maps a relationship `group → audience`. Collapsing the router/`RoutingMatch` to read the scalar `audience`/`channel` directly is the in-flight follow-up (it does not change the deployed data contract or emitted events).
+- **Acceptance:** covered by `NotificationRouterTest`.
 
-**P1-5. New class `SubscriberResolver` (relationship → User + contact).**
-- New file: `backend/pgr-services/src/main/java/org/egov/pgr/service/notification/SubscriberResolver.java` — `resolve(group, request) → ResolvedRecipient{userUuid,name,phone,email,locale,audience}`. Absorbs `process()` lines 86–116 (employee-phone), `getEmployeeName(...ASSIGN)` PI-history (611–639) for ASSIGNEE/PREVIOUS_ASSIGNEE, `fetchUserByUUID` (541–571), `buildMobileWithCountryCode` (822–829), and `ComplaintDomainEventService.getStakeholders` citizen/assignee detection (106–129). Null-safe: returns null when no contact (caller skips → failure isolation).
-  - Move `getEmployeeName` + `fetchUserByUUID` + `buildMobileWithCountryCode` out of `NotificationService` into this class (verified private to NotificationService; `EscalationService:143` only shares the URL builder, no collision).
-- **Acceptance:** covered by `SubscriberResolverTest` (P1-7); null-safety cases pass.
+**P1-5. SubscriberResolver (relationship → User + contact).** — DONE, but **NOT a standalone class**.
+- **AS BUILT:** there is no `SubscriberResolver.java`. The resolution logic (citizen + assignee/previous-assignee via PI-history, phone/email lookup, country-code) lives inside `NotificationService` as the private `ResolvedRecipient` record + resolve helpers, normalizing the relationship to the `{CITIZEN, EMPLOYEE}` audience. `getEmployeeName`/`fetchUserByUUID`/`buildMobileWithCountryCode` were retained in `NotificationService` (shared with the legacy path).
+- **Acceptance:** exercised by `NotificationConfigDrivenEmissionTest` + `NotificationGoldenOutputTest`.
 
-**P1-6. New class `TemplateRenderer` (config-2 lookup + placeholder fill + localize, D4).**
-- New file: `backend/pgr-services/src/main/java/org/egov/pgr/service/notification/TemplateRenderer.java` — `render(audience, eventName, channel, locale, request, recipient) → String body`. Reads `mdmsUtils.getNotificationTemplates(...)`, picks by `(audience,eventName,channel,locale)` with default-locale fallback, returns null (skip recipient, logged) if missing. Fills ALL 9 existing placeholders: `{emp_name}`, `{ulb}`, `{status}`, `{download_link}` (via `notificationUtil.getShortnerURL` + `config.getMobileDownloadLink`), `{additional_comments}`, `{rating}`, `{complaint_type}`, `{id}`, `{date}`, plus `{emp_department}`/`{emp_designation}`/`{ao_designation}` from `getHRMSEmployee` (move it here from `NotificationService` 662–713). Localizes here (D4).
-- **Acceptance:** covered by `TemplateRendererTest` (P1-7); all 9 placeholders substitute; locale fallback works.
+**P1-6. New class `TemplateRenderer` (config-2 lookup + placeholder fill + localize, D4).** — DONE.
+- New file: `backend/pgr-services/src/main/java/org/egov/pgr/service/notification/TemplateRenderer.java` — **AS BUILT** signature `render(tenantId, audience, action, toState, channel, locale, Map<String,String> values) → String body`. Picks by **`(audience, action, toState, channel, locale)`** (NOT `eventName`) with default-locale fallback, returns null (skip recipient, logged) if missing. The caller (`NotificationService`) assembles the placeholder `values` map (all existing tokens: `{id}`,`{complaint_type}`,`{emp_name}`,`{emp_designation}`,`{emp_department}`,`{ulb}`,`{status}`,`{date}`,`{download_link}`,`{rating}`,`{additional_comments}`); the renderer does literal `{token}` substitution.
+- **Acceptance:** covered by `TemplateRendererTest`; substitution + locale fallback + missing-template-null verified.
 
 **P1-7. Wire the config-driven path into `NotificationService` (flag-branched).**
 - File: `backend/pgr-services/src/main/java/org/egov/pgr/service/NotificationService.java`:
   - Inject `NotificationRouter`, `SubscriberResolver`, `TemplateRenderer`, and the `Producer`.
   - At the top of `process()` (~65): `if (config.getNotificationConfigDriven()) { processConfigDriven(request, topic); return; }` — else fall through to the **verbatim legacy body** (74–160).
-  - New `processConfigDriven()`: derive `businessService=PGR`, `action=workflow.getAction()`, `toState=service.getApplicationStatus()`, `fromState=null` (not on ServiceRequest in consumer path — router matches on action+toState, see risk R1); `route(...)`; for each match, for each group `resolve(...)` **in its own try/catch** (failure isolation); for each channel `render(...)`; `publishRenderedEvent(...)`.
-  - New `publishRenderedEvent(request, recipient, channel, eventName, body, subject)` — builds a per-recipient pre-rendered event map `{eventName, channel, subscriberId, contact{phone,email,name,locale}, renderedBody, subject, transactionId, data}`, pushes via `Producer` to `config.getComplaintsDomainEventsTopic()`. `subscriberId = tenantId+":"+userUuid` (fallback `tenantId+":"+mobile`); `transactionId = serviceRequestId:action:toState:subscriberId:channel`. **Guard against null subscriberId** (skip+log, risk R7).
-  - `getFinalMessage()` (170–531) and the 7 if-blocks remain ONLY for legacy; not called when flag on.
-- **Acceptance:** flag off ⇒ byte-identical legacy behavior; flag on ⇒ per-recipient events on `complaints.domain.events`; one bad recipient does not drop the others.
+  - New `processConfigDriven()`: derive `businessService=PGR`, `action`, `toState=applicationStatus`, `fromState=null`; `route(...)`; for each match, resolve the recipient **in its own try/catch** (failure isolation); for each channel `render(...)`; `publishRenderedEvent(...)`. A `dedupeKey = audience|channel|subscriberKey` skips duplicate emissions within one transition.
+  - **AS-BUILT event shape** (`publishRenderedEvent`): `{eventId, eventType:"COMPLAINTS_WORKFLOW_TRANSITIONED", eventName:"COMPLAINTS.WORKFLOW.<ACTION>", eventTime, producer:"complaints-service", module:"Complaints", entityType:"COMPLAINT", entityId, tenantId, channel, subscriberId, contact{userId,type,name,phone,email,locale}, renderedBody, subject, transactionId, data{complaintNo,status,action,toState}}`, pushed via `Producer` to the complaints-domain-events topic. `subscriberId = tenantId+":"+userUuid` (fallback `tenantId+":"+mobile`); `transactionId = serviceRequestId:action:toState:subscriberId:channel`. **Skips when subscriberId is null** (risk R7).
+  - `getFinalMessage()` + the 7 if-blocks remain ONLY for legacy; not called when flag on.
+- **Acceptance:** flag off ⇒ byte-identical legacy behavior; flag on ⇒ per-recipient×channel events; one bad recipient does not drop the others.
 
 **P1-8. Gate the coarse `ComplaintDomainEventService` publish off when flag on (avoid double-emit).**
 - File: `backend/pgr-services/src/main/java/org/egov/pgr/service/ComplaintDomainEventService.java` — `publishWorkflowTransitionEvent` (39–62, called from `PGRService.java:96,178`): no-op (or audit-only) when `config.getNotificationConfigDriven()` is true. Keep `getStakeholders` (103–132) logic intact for legacy (or delegate to `SubscriberResolver`).
 - **Acceptance:** with flag on, only per-recipient events appear on `complaints.domain.events` (no coarse stakeholders[] event); flag off ⇒ unchanged.
 
-**P1-9. Unit + golden tests (JUnit 4 + Mockito — match the module).**
-- New: `backend/pgr-services/src/test/java/org/egov/pgr/service/notification/NotificationRouterTest.java` — one case per §11 row + no-match-returns-empty + fromState-optional + unknown-enum-skipped.
-- New: `.../notification/SubscriberResolverTest.java` — each group resolves correct user/contact incl. PI-history (assignee, previous-assignee), null-safety (no citizen uuid, no assignee), one-failure-does-not-abort.
-- New: `.../notification/TemplateRendererTest.java` — placeholder substitution, locale selection + default fallback, missing-template returns null, audience normalization (ASSIGNEE/CREATOR/PREVIOUS_ASSIGNEE→EMPLOYEE).
-- New (THE GATE): `.../notification/NotificationGoldenOutputTest.java` — for each §11 transition, assert `Set<(recipient,channel,renderedBody)>` from legacy path (flag off) == config-driven path (flag on), same fixtures. **Restrict config seed to SMS-only** so it's apples-to-apples (legacy emits SMS only; WHATSAPP rows are net-new, tested separately). Mock the URL shortener + date deterministically.
-- New fixtures: `src/test/resources/notification/legacy-localization.json`, `seed-templates.json`, `seed-routing.json` (curated from Bomet's `rainmaker-pgr.json`).
-- File: `backend/pgr-services/pom.xml` — no new deps (JUnit 4 + Mockito + jayway jsonpath already present; confirm jsonpath on test classpath).
-- **Acceptance:** all unit tests green; golden test passes for every §11 SMS transition.
+**P1-9. Unit + golden tests (JUnit 4 + Mockito).** — DONE.
+- AS BUILT, the notification test set is: `NotificationRouterTest.java`, `TemplateRendererTest.java`, `NotificationGoldenOutputTest.java` (THE GATE), and `NotificationConfigDrivenEmissionTest.java` (end-to-end TRIGGER: one ASSIGN action → SMS+WHATSAPP+EMAIL events). There is **no** `SubscriberResolverTest.java` (no standalone resolver class — see P1-5).
+- `NotificationGoldenOutputTest` asserts `Set<(recipient,channel,renderedBody)>` legacy(flag off) == config-driven(flag on) restricted to **SMS** (WHATSAPP/EMAIL are net-new). URL shortener + date mocked deterministically.
+- Fixtures: `src/test/resources/notification/legacy-localization.json`, `seed-templates.json`, `seed-routing.json`.
+- **Acceptance:** 26 PGR notification tests green incl. the golden no-op gate.
 
 **P1-10. CI verification on egov-ci (per `ci-testing` skill).**
 - New: `local-setup/scripts/ci-notification-routing.py` — admin token; seed both masters at the P0-4 level; restart pgr-services or DEL mdms cache; assert tenant scoping (ke.bomet resolves, sibling does not); drive APPLY→ASSIGN→RESOLVE→RATE via Kong; consume `complaints.domain.events` via `rpk` and assert each event has the full shape + per-recipient×channel fan-out count matches §11; idempotency (replay one event, assert one `nb_dispatch_log` row per transactionId — depends on Phase 2 migration, run after); failure-isolation (inject one bad recipient, assert others still produced).
@@ -171,9 +167,11 @@ Goal: PGR reads both masters and emits pre-rendered per-recipient events behind 
 
 ### Phase 2 — Novu + Baileys infra on Bomet + novu-bridge pass-through
 
-> **CRITICAL CORRECTION to the design (§8):** Bomet does NOT run `tilt-demo/docker-compose.deploy.yaml`. Bomet runs the CCRS `local-setup/ansible/playbook-deploy.yml`, which copies **`local-setup/docker-compose.egov-digit.yaml`** to `/opt/digit/` and runs it with `COMPOSE_PROFILES` from `enable_novu`. **The entire Novu stack already exists** in that file behind the `notifications` profile (novu-mongo/api/worker/ws/dashboard/bridge-endpoint, digit-config-service, digit-user-preferences-service, novu-bridge, otp-publisher). This is NOT a port — it is (a) re-point novu-bridge env to pass-through, (b) add ONE baileys-send-service block, (c) ensure 3 Kafka topics, (d) one PGR flag, (e) build+push 3 images. **All edits land in committed files; never `vi` on the box (Ansible reverts server-side edits).**
+> **AS BUILT — deploy reality (confirmed):** Bomet does NOT run `tilt-demo`. It deploys via **`local-setup/ansible/deploy.sh bomet`** (→ `playbook-deploy.yml`), which copies `local-setup/docker-compose.egov-digit.yaml` + the per-tenant overlay `docker-compose.bomet.yml` to `/opt/digit/` and runs `docker compose` with `COMPOSE_PROFILES` extended by `notifications` when `enable_novu: true`. **The entire Novu stack already exists** in that file behind the `notifications` profile (novu-mongo/api/worker/ws/dashboard, novu-bridge, novu-bridge-endpoint, digit-user-preferences-service, otp-publisher). This was NOT a port — it was (a) re-point novu-bridge env to pass-through, (b) add ONE `baileys-send-service` block, (c) ensure 3 Kafka topics, (d) set the PGR flag in the Bomet overlay, (e) build+push 3 images. **All edits land in committed files; never `vi` on the box (Ansible reverts server-side edits).**
+>
+> **Novu bootstrapped via API:** organization **Bomet** with two environments **Development + Production**; the SMS (**Twilio**) + Email (**Gmail/SMTP nodemailer**) integrations and the `complaints-sms` / `complaints-email` / `complaints-whatsapp` workflows (defined in `backend/novu-bridge-endpoint/workflows.js`).
 
-Goal: novu-bridge becomes pass-through + identify + Baileys-routing; Baileys send-service runs on Bomet; nb_dispatch_log keyed per recipient; infra ready (still SMS-only until Phase 3).
+Goal: novu-bridge becomes pass-through + identify; SMS/Email route through Novu providers, WhatsApp branches to baileys-send-service; nb_dispatch_log keyed per recipient.
 
 **P2-1. novu-bridge: gut template/provider resolution from `DispatchPipelineService.process()`.**
 - File: `backend/novu-bridge/.../service/DispatchPipelineService.java`:
@@ -220,9 +218,9 @@ Goal: novu-bridge becomes pass-through + identify + Baileys-routing; Baileys sen
 **P2-7. Compose: add baileys-send-service + re-point novu-bridge env.**
 - File: `local-setup/docker-compose.egov-digit.yaml`:
   - Add `baileys-send-service` block after `otp-publisher` (~line 2288): `profiles:["notifications"]`, `image:${BAILEYS_IMAGE:-baileys-send-service:local}`, `restart:unless-stopped`, port `13040:3040`, volume `baileys_auth_data:/app/auth`, healthcheck `/healthz`, `egov-network`, env `PORT=3040 AUTH_DIR=/app/auth SEND_TOKEN=...`. Add `baileys_auth_data: null` to the top-level `volumes:` block.
-  - novu-bridge env (~1985–2061): add `NOVU_BRIDGE_BAILEYS_URL=http://baileys-send-service:3040/send`; mark config-service envs (CONFIG_HOST/RESOLVE_PATH/SEARCH_PATH ~2026–2032) for removal post-cutover; keep `NOVU_BRIDGE_PREFERENCE_ENABLED=false` for Phase 3 start; make channel default overridable.
+  - novu-bridge env (~1985–2061): add `NOVU_BRIDGE_BAILEYS_URL=http://baileys-send-service:3040/send` + the per-channel workflow ids (`NOVU_BRIDGE_WORKFLOW_ID_SMS=complaints-sms`, `..._EMAIL=complaints-email`, `..._WHATSAPP=complaints-whatsapp`); mark config-service envs for removal post-cutover; keep `NOVU_BRIDGE_PREFERENCE_ENABLED=false` initially (PGR owns locale; channel is per-event, not bridge-wide).
   - novu-bridge `depends_on` (~1970–1982): add `baileys-send-service: {condition: service_healthy}`; relax hard `digit-config-service: service_healthy` once template-resolve is gone (retain config-service one release).
-  - pgr-services env (~1255–1335): the flag flip lives in the Bomet overlay (P2-9), not here; but ensure `PGR_DOMAIN_EVENTS_TOPIC: complaints.domain.events` and point `${PGR_SERVICES_IMAGE}` at the new CI tag.
+  - pgr-services env (~1255–1335): the flag flip lives in the Bomet overlay (P2-9), not here; but ensure the domain-events topic env (`KAFKA_TOPICS_COMPLAINTS_DOMAIN_EVENTS: complaints.domain.events`) and point `${PGR_SERVICES_IMAGE}` at the new CI tag.
   - Make `novu-bridge` image overridable: `image: ${NOVU_BRIDGE_IMAGE:-registry.preview.egov.theflywheel.in/egovio/novu-bridge:latest}`.
 - **Acceptance:** `docker compose config` validates; baileys block present; novu-bridge env updated; no hand-edits required on the box.
 
@@ -234,8 +232,8 @@ Goal: novu-bridge becomes pass-through + identify + Baileys-routing; Baileys sen
 - **Acceptance:** topics created before bridge consumes; 3 images present in registry catalog; `.env` carries the new vars.
 
 **P2-9. Bomet host_vars + overlay (flag on for Bomet only).**
-- File: `local-setup/ansible/inventory/host_vars/bomet.yml` (gitignored, operator-local): add `enable_novu: true`, `pgr_services_image: 10.0.0.4:5000/egovio/pgr-services:notif-config-<sha>`, `novu_bridge_image: 10.0.0.4:5000/egovio/novu-bridge:passthrough-<sha>`, `baileys_image: 10.0.0.4:5000/egovio/baileys-send-service:<sha>`, `novu_bridge_channel: sms` (SMS-first per §3 phasing). Keep `novu_api_key`/`twilio_*` empty on first deploy (two-pass bootstrap).
-- File: `local-setup/docker-compose.bomet.yml` — add a `pgr-services` override: `environment: { PGR_NOTIFICATION_CONFIG_DRIVEN: 'true', PGR_DOMAIN_EVENTS_TOPIC: complaints.domain.events }`. (Per-tenant overlay survives Ansible re-runs; shared egov-digit default stays off for other tenants.)
+- File: `local-setup/ansible/inventory/host_vars/bomet.yml` (gitignored, operator-local): set `enable_novu: true` and the image pins (`pgr_services_image`, `novu_bridge_image`, `baileys_image` from `10.0.0.4:5000`). Keep `novu_api_key`/Twilio creds empty on first deploy (two-pass bootstrap). The config-driven flag itself is set in the Bomet compose overlay, not host_vars.
+- File AS BUILT: `local-setup/docker-compose.bomet.yml` has the `pgr-services` override `environment: { PGR_NOTIFICATION_CONFIG_DRIVEN: 'true', KAFKA_TOPICS_COMPLAINTS_DOMAIN_EVENTS: complaints.domain.events }`. **This is where the config-driven flag is set — only Bomet flips; the shared egov-digit default stays `false`.** The per-tenant overlay survives Ansible re-runs.
 - **Acceptance:** `./deploy.sh bomet` brings up the notifications profile incl. baileys; pgr-services runs with the flag on; other tenants unaffected.
 
 **P2-10. novu-bridge tests (JUnit 5 — match the module).**
@@ -244,31 +242,29 @@ Goal: novu-bridge becomes pass-through + identify + Baileys-routing; Baileys sen
 - New: `.../service/provider/BaileysProviderStrategyTest.java` — supports('baileys')/WHATSAPP, free-form (no contentSid), factory selects Baileys over generic.
 - **Acceptance:** all green; pass-through inversion proven.
 
-**Phase 2 exit criteria:** novu-bridge image is pass-through + identify + Baileys-aware; baileys-send-service runs on Bomet (paired); topics exist; nb_dispatch_log keyed per recipient; idempotency CI assertion (P1-10) now passes; all infra up, SMS-only, flag on.
+**Phase 2 exit criteria (met):** novu-bridge image is pass-through + identify; SMS/Email route through Novu (Twilio/Gmail), WhatsApp branches to baileys-send-service (paired on Bomet); topics exist; `nb_dispatch_log` keyed on transactionId; flag on for Bomet. The seed enables all three channels (not SMS-only); SMS parity is gated by the golden test.
 
 ---
 
-### Phase 3 — Bomet cutover (SMS → WhatsApp → email) + tracking verify
+### Phase 3 — Bomet cutover + tracking verify — LIVE
 
-Goal: flip Bomet to the config-driven path channel-by-channel and verify Novu tracking. Gated on operator credentials (§6).
+Status: **SMS + Email live via Novu → Twilio / Gmail-SMTP; WhatsApp live via Baileys (paired).** The seed enables all three channels; the flag is on in the Bomet overlay.
 
-**P3-1. SMS cutover (Bomet's immediate need).**
-- Pre-req: operator-supplied SMS gateway creds + Kenya-approved sender ID configured (Novu SMS integration or `ProviderDetail` seed); two-pass Novu bootstrap done (`novu_api_key` populated, re-deploy).
-- Action: confirm `PGR_NOTIFICATION_CONFIG_DRIVEN=true` (P2-9), `novu_bridge_channel: sms`, all routing rows SMS-only. Deploy.
-- Verify: drive ASSIGN for a complaint whose citizen mobile = real test MSISDN; SMS received; Novu dashboard `/activity` shows subscriber `ke.bomet:<uuid>` with phone/locale + DELIVERED; `nb_dispatch_log` row `status=SENT` for the transactionId.
-- **Acceptance:** golden-output behavior holds in production (citizen+employee get the same SMS bodies as legacy); tracking visible in Novu.
+**P3-1. SMS cutover.** — LIVE.
+- Pre-req: **Twilio** creds (`ACCOUNT_SID`/`AUTH_TOKEN`/`FROM`) configured as the Novu SMS integration; two-pass Novu bootstrap done (`novu_api_key` populated, re-deploy).
+- AS BUILT: flag set in `docker-compose.bomet.yml` (P2-9); SMS routes `PGR → Kafka → novu-bridge → identify → trigger `complaints-sms` → Twilio`.
+- Verify: drive ASSIGN; SMS received via Twilio; Novu `/activity` shows subscriber `ke.bomet:<uuid>` + DELIVERED; `nb_dispatch_log` `status=SENT`.
+- **Acceptance:** golden-output behavior holds in production; tracking visible in Novu.
 
-**P3-2. WhatsApp enablement (config-only routing edit + Baileys pairing).**
-- Pre-req: dedicated WhatsApp number paired (scan `/qr` via SSH tunnel; auth-state persisted in `baileys_auth_data`); **validate pairing actually works on the Hetzner datacenter IP** (risk R9 — may hit "Error 405 IP blocked"); WHATSAPP templates seeded for the relevant events.
-- Action: add `WHATSAPP` to the desired routing rows' `channels[]` via the configurator (no redeploy); set `novu_bridge_channel` to allow whatsapp.
-- Verify: drive a transition; WhatsApp received; `nb_dispatch_log` + Baileys send-service log + (if routed via Novu) Novu activity.
-- **Acceptance:** WhatsApp delivered for enabled events; SMS still works; failure of Baileys (503) is retriable (routes to retry, not DLQ).
+**P3-2. WhatsApp enablement (Baileys, direct).** — LIVE.
+- Pre-req: dedicated WhatsApp number paired (scan `/qr` via SSH tunnel; auth-state in `baileys_auth_data`); pairing validated on the Hetzner IP (risk R9).
+- AS BUILT: WHATSAPP rows are already in the seed; novu-bridge branches `channel=WHATSAPP` to `BaileysSendClient.send` → baileys-send-service (**NOT through Novu** — D7/R10). Tracking is in `nb_dispatch_log` + Baileys logs, not Novu's feed. Wrapping Baileys as a Novu provider so WhatsApp tracks in Novu is **BACKLOG TASK-031 (GitHub egovernments/CCRS#973)**.
+- **Acceptance:** WhatsApp delivered via Baileys; SMS still works; Baileys failure is retriable (retry, not DLQ).
 
-**P3-3. Email enablement (config-only + email provider).**
-- Pre-req: operator email provider (SMTP or SendGrid/SES API key + verified from-domain w/ SPF/DKIM) configured as a Novu email integration; EMAIL templates (with `subject`) seeded.
-- Action: add `EMAIL` to routing rows via configurator; ensure recipients have resolvable emails (SubscriberResolver populates `email`).
-- Verify: drive a transition; email received; Novu email activity tracked; `nb_dispatch_log` row.
-- **Acceptance:** email delivered + tracked for enabled events.
+**P3-3. Email enablement (Gmail/SMTP via Novu).** — LIVE.
+- Pre-req: **Gmail / SMTP** (nodemailer) configured as the Novu email integration with a verified from-address; EMAIL templates (with `subject`) seeded.
+- AS BUILT: EMAIL routes through Novu workflow `complaints-email`; recipients need a resolvable email (PGR's resolver populates `contact.email`).
+- **Acceptance:** email delivered via Gmail/SMTP + tracked in Novu.
 
 **P3-4. Tracking + monitoring close-out.**
 - Run `local-setup/scripts/ci-novu-tracking-check.md` checklist on Bomet: every recipient appears in Novu dashboard as a subscriber WITH profile (the gap §5 closes via identify) AND per-message delivery status across SMS/WhatsApp/email.
@@ -285,16 +281,18 @@ Goal: flip Bomet to the config-driven path channel-by-channel and verify Novu tr
 ### PGR (`backend/pgr-services`)
 | Path | Purpose |
 |---|---|
-| `src/main/java/org/egov/pgr/service/notification/NotificationRouter.java` | Config-1 lookup: transition → subscriber groups + channels |
-| `src/main/java/org/egov/pgr/service/notification/SubscriberResolver.java` | Relationship enum → concrete User + contact (absorbs PI-history) |
-| `src/main/java/org/egov/pgr/service/notification/TemplateRenderer.java` | Config-2 lookup + placeholder fill + localize (D4) |
-| `src/test/java/.../notification/NotificationRouterTest.java` | Router unit tests (one per §11 row) |
-| `src/test/java/.../notification/SubscriberResolverTest.java` | Resolver unit tests + null-safety |
+| `src/main/java/org/egov/pgr/service/notification/NotificationRouter.java` | Config-1 lookup: transition → routing matches + channels |
+| `src/main/java/org/egov/pgr/service/notification/RoutingMatch.java` | Router result holder (subscribers/channels — pre-flatten holdover, see P1-4) |
+| `src/main/java/org/egov/pgr/service/notification/TemplateRenderer.java` | Config-2 lookup `(audience,action,toState,channel,locale)` + placeholder fill + localize (D4) |
+| `src/test/java/.../notification/NotificationRouterTest.java` | Router unit tests |
 | `src/test/java/.../notification/TemplateRendererTest.java` | Renderer unit tests |
-| `src/test/java/.../notification/NotificationGoldenOutputTest.java` | **Backward-compat gate** (legacy == config-driven) |
+| `src/test/java/.../notification/NotificationGoldenOutputTest.java` | **Backward-compat gate** (legacy == config-driven, SMS) |
+| `src/test/java/.../notification/NotificationConfigDrivenEmissionTest.java` | End-to-end TRIGGER: one ASSIGN → SMS+WHATSAPP+EMAIL events |
 | `src/test/resources/notification/legacy-localization.json` | Legacy SMS body fixtures |
-| `src/test/resources/notification/seed-templates.json` | Config-2 fixtures (curated from legacy) |
-| `src/test/resources/notification/seed-routing.json` | Config-1 fixtures (§11) |
+| `src/test/resources/notification/seed-templates.json` | Config-2 fixtures |
+| `src/test/resources/notification/seed-routing.json` | Config-1 fixtures |
+
+> AS BUILT: there is **no** `SubscriberResolver.java`/`SubscriberResolverTest.java` (resolver logic lives in `NotificationService`); the resolver-side modifications landed in the existing `NotificationService.java` (P1-7), not a new class.
 
 ### novu-bridge (`backend/novu-bridge`)
 | Path | Purpose |
@@ -308,36 +306,38 @@ Goal: flip Bomet to the config-driven path channel-by-channel and verify Novu tr
 ### Baileys send-service (`utilities/baileys-send-service`)
 | Path | Purpose |
 |---|---|
-| `utilities/baileys-send-service/index.js` | Express wrapper around Baileys (`/send`, `/healthz`, `/qr`) |
-| `utilities/baileys-send-service/package.json` | Pins baileys 7.0.0-rc.9 + express + qrcode (Node ≥20) |
+| `utilities/baileys-send-service/src/server.js` | Express wrapper around Baileys (`/send`, `/healthz`, `/qr`) — AS BUILT under `src/` |
+| `utilities/baileys-send-service/package.json` | Pins baileys + express + qrcode (Node ≥20) |
 | `utilities/baileys-send-service/Dockerfile` | node:20 image, `/app/auth` volume, healthcheck |
 | `utilities/baileys-send-service/.dockerignore` | Keep node_modules/auth out of image |
 | `utilities/baileys-send-service/README.md` | Operator runbook (pairing, re-pair, ban-risk) |
 
-### MDMS schemas + seed
+### MDMS schemas + seed — AS BUILT (all in `default-data-handler`, NOT nairobi-mdms)
 | Path | Purpose |
 |---|---|
-| `local-setup/ansible/nairobi-mdms/mdms/schemas/RAINMAKER-PGR/NotificationRouting.json` | Routing schema (Nairobi parity) |
-| `local-setup/ansible/nairobi-mdms/mdms/schemas/RAINMAKER-PGR/NotificationTemplate.json` | Template schema (Nairobi parity) |
-| `local-setup/ansible/nairobi-mdms/mdms/data/ke/bomet/RAINMAKER-PGR/NotificationRouting.json` | Bomet routing seed (§11, SMS-only) |
-| `local-setup/ansible/nairobi-mdms/mdms/data/ke/bomet/RAINMAKER-PGR/NotificationTemplate.json` | Bomet template seed (curated from legacy) |
+| `utilities/default-data-handler/src/main/resources/schema/RAINMAKER-PGR.json` | Appended both schemas (flattened scalar) — registers via `default.mdms.schema.create.list` |
+| `utilities/default-data-handler/src/main/resources/mdmsData-dev/RAINMAKER-PGR/RAINMAKER-PGR.NotificationRouting.json` | Routing seed — 33 scalar rows (all 3 channels) |
+| `utilities/default-data-handler/src/main/resources/mdmsData-dev/RAINMAKER-PGR/RAINMAKER-PGR.NotificationTemplate.json` | Template seed — 33 rows, 1:1 with routing |
+| `utilities/default-data-handler/scripts/migrate-pgr-sms-templates.py` | Curated legacy `PGR_*_SMS_MESSAGE` → template migration helper |
 
-> (Bomet's primary schema registration is via appending to the existing `utilities/default-data-handler/src/main/resources/schema/RAINMAKER-PGR.json` — not a new file.)
+> The planned `nairobi-mdms/.../RAINMAKER-PGR/Notification*.json` parity files were **not** created; the `{tenantid}`-substituted default-data-handler seed lands at the state tenant `ke` that PGR reads.
 
-### Configurator
+### Configurator — AS BUILT (no custom editor; flat scalar masters)
 | Path | Purpose |
 |---|---|
-| `configurator/src/admin/themeEditor/TransitionRoutingEditor.tsx` | Custom editor for routing transitions[] |
-| `configurator/src/admin/schemaDescriptors/notification-routing.ts` | Descriptor wiring routing → custom editor |
-| `configurator/src/admin/schemaDescriptors/notification-template.ts` | Descriptor giving template a friendly generic form |
-| `configurator/src/admin/widgets/TransitionArrayInput.tsx` | OPTIONAL reusable array-of-objects widget (only if not using custom editor) |
+| `configurator/src/admin/schemaDescriptors/notification-routing.ts` | Plain descriptor (scalar audience/channel fields) |
+| `configurator/src/admin/schemaDescriptors/notification-template.ts` | Plain descriptor (body textarea, placeholders chips) |
+| `configurator/src/admin/schemaDescriptors/index.ts` | Register both descriptors |
+| `configurator/packages/data-provider/src/providers/resourceRegistry.ts` | Register both MDMS resources (idField=`action`) |
+| `configurator/src/admin/DigitLayout.tsx` | New top-level **Notifications** nav group |
+| `configurator/src/providers/i18nProvider.ts` | Nav i18n keys |
+
+> The planned `TransitionRoutingEditor.tsx` / `TransitionArrayInput.tsx` were **not** built — flattening removed the array-of-objects editing problem.
 
 ### Tests / scripts (CI + ops)
 | Path | Purpose |
 |---|---|
 | `local-setup/scripts/ci-notification-routing.py` | CI integration driver (seed→drive→assert events→idempotency→scoping) |
-| `local-setup/scripts/ci-novu-tracking-check.md` | Channel-delivery + Novu-tracking checklist (Bomet) |
-| `local-setup/tests/e2e/specs/citizen/notification-config-driven.spec.ts` | OPTIONAL Playwright E2E smoke |
 
 ---
 
@@ -370,8 +370,8 @@ Goal: flip Bomet to the config-driven path channel-by-channel and verify Novu tr
 - `local-setup/docker-compose.egov-digit.yaml`: novu-bridge env 1985–2061 (re-point); depends_on 1970–1982 (+baileys, relax config-service); pgr-services env 1255–1335 (topic, image); new baileys block after 2288 + `baileys_auth_data` volume; redpanda command (optional explicit auto-create).
 - `local-setup/ansible/playbook-deploy.yml`: + topic-create task (near novu-bootstrap ~2328); + 3 image build/push tasks (mirror ~475–480, ~601–612).
 - `local-setup/ansible/templates/digit.env.j2`: after PGR_SERVICES_IMAGE (20–24) / OTP_PUBLISHER_IMAGE (34) → BAILEYS_IMAGE, NOVU_BRIDGE_IMAGE, baileys env.
-- `local-setup/ansible/inventory/host_vars/bomet.yml`: + enable_novu, image pins, novu_bridge_channel.
-- `local-setup/docker-compose.bomet.yml` 8–21 → + pgr-services override (PGR_NOTIFICATION_CONFIG_DRIVEN=true).
+- `local-setup/ansible/inventory/host_vars/bomet.yml`: + enable_novu, image pins (flag itself is in the overlay below, not host_vars).
+- `local-setup/docker-compose.bomet.yml`: + pgr-services override (`PGR_NOTIFICATION_CONFIG_DRIVEN=true`, `KAFKA_TOPICS_COMPLAINTS_DOMAIN_EVENTS=complaints.domain.events`).
 
 ### Configurator
 - `packages/data-provider/src/providers/resourceRegistry.ts` after 145 → 2 REGISTRY entries.
@@ -388,16 +388,16 @@ Goal: flip Bomet to the config-driven path channel-by-channel and verify Novu tr
 
 | Layer | What's asserted | Where |
 |---|---|---|
-| PGR unit | transition → subscriber groups + channels for every §11 row; fromState-optional; unknown-enum skip; empty-on-no-match | `NotificationRouterTest.java` |
-| PGR unit | each group → correct user/contact incl. PI-history (assignee/previous-assignee); null-safety; one-failure-isolated | `SubscriberResolverTest.java` |
-| PGR unit | all 9 placeholders substituted; locale select + default fallback; missing-template→null; audience normalization | `TemplateRendererTest.java` |
-| PGR golden (GATE) | `Set<(recipient,channel,renderedBody)>` legacy(flag off) == config-driven(flag on) for every §11 SMS transition | `NotificationGoldenOutputTest.java` |
-| novu-bridge unit | identify upsert (first POSTs, second skipped via TTL); subscriberId + uuid-less fallback | `DispatchPipelinePassThroughTest.java` |
-| novu-bridge unit | pass-through: resolveTemplate NEVER called, payload.body == renderedBody | `DispatchPipelinePassThroughTest.java` / `ProviderAgnosticTest.java` |
-| novu-bridge unit | provider routing SMS→gateway, EMAIL→email, WHATSAPP→Baileys; Baileys wins over Meta | `BaileysProviderStrategyTest.java`, `ProviderAgnosticTest.java` |
-| CI integration (egov-ci) | seed→drive transitions→events on `complaints.domain.events` match §11 shape + fan-out; tenant scoping (ke.bomet resolves, sibling not); idempotency (1 row/txnId); failure isolation | `local-setup/scripts/ci-notification-routing.py` |
-| Channel delivery (Bomet) | real SMS/email/WhatsApp received; Novu subscriber profile + per-message DELIVERED; nb_dispatch_log SENT | `local-setup/scripts/ci-novu-tracking-check.md` |
-| E2E (optional) | citizen files→assign→resolve→rate on Bomet UI; expected notifications per step | `local-setup/tests/e2e/specs/citizen/notification-config-driven.spec.ts` |
+| PGR unit | transition → routing matches + channels; fromState-optional; empty-on-no-match | `NotificationRouterTest.java` |
+| PGR unit | resolver path (citizen + assignee/previous-assignee via PI-history; null-safety; one-failure-isolated) | covered by `NotificationConfigDrivenEmissionTest.java` (no standalone resolver class) |
+| PGR unit | placeholder substitution; locale select + default fallback; missing-template→null | `TemplateRendererTest.java` |
+| PGR golden (GATE) | `Set<(recipient,channel,renderedBody)>` legacy(flag off) == config-driven(flag on) for every §11 **SMS** transition | `NotificationGoldenOutputTest.java` |
+| PGR emission | one ASSIGN action → the full set of per-recipient×channel events (SMS+WHATSAPP+EMAIL) | `NotificationConfigDrivenEmissionTest.java` |
+| novu-bridge unit | identify upsert (first POSTs, second skipped via TTL); subscriberId + uuid-less fallback; config-service NEVER called; payload.body == renderedBody | `DispatchPipelinePassThroughTest.java` |
+| novu-bridge unit | provider routing SMS→Novu/Twilio, EMAIL→Novu/Gmail, WHATSAPP→Baileys; Baileys wins over Meta | `BaileysProviderStrategyTest.java` |
+| CI integration (egov-ci) | seed→drive transitions→events on `complaints.domain.events` match shape + fan-out; tenant scoping; idempotency (1 row/txnId); failure isolation | `local-setup/scripts/ci-notification-routing.py` |
+
+> AS BUILT: 26 PGR tests + 10 novu-bridge tests green (per the build commit). Live SMS/email confirmed via Novu→Twilio/Gmail; WhatsApp via Baileys.
 
 ---
 
@@ -405,14 +405,14 @@ Goal: flip Bomet to the config-driven path channel-by-channel and verify Novu tr
 
 | Item | Needed for | Gated phase | Notes |
 |---|---|---|---|
-| **SMS gateway creds + Kenya-approved sender ID** (API key/secret, number format) | SMS cutover | **Phase 3 (P3-1)** — Bomet's immediate need | Configured as Novu SMS integration or `ProviderDetail` seed; confirm Bomet's current gateway. |
-| **Novu API key** (sign up at `https://bometfeedbackhub.digit.org/novu/` after first deploy, paste into host_vars, re-deploy) | All Novu delivery | **Phase 3** (two-pass bootstrap) | `novu-bridge` won't dispatch until `NOVU_API_KEY` resolves (default `changeme`). |
-| **Dedicated WhatsApp number** (throwaway, not personal/business) + QR scan + acceptance of unofficial-API/ban risk | WhatsApp | **Phase 3 (P3-2)** | Pair via SSH tunnel to `/qr`; auth-state persists in `baileys_auth_data`. **Validate pairing works on Hetzner IP first** (R9). |
-| **Email provider** (SMTP host/port/user/pass OR SendGrid/SES API key) + verified from-domain (SPF/DKIM) | Email | **Phase 3 (P3-3)** | Novu email integration. |
-| **CI/registry push access** (egov-ci → `10.0.0.4:5000`) | Building pgr-services/novu-bridge/baileys images | **Phase 1 (images) / Phase 2 (infra)** | Bomet pull already configured via `insecure-registries`. |
-| **Tenant-scoping confirmation** on live Bomet (P0-4) | Correct seed level | **Phase 0** | Blocks the seed path (`ke.bomet` vs `ke`). |
+| **Twilio creds** (`ACCOUNT_SID`/`AUTH_TOKEN`/`FROM`, Kenya-approved) | SMS | **Phase 3 (P3-1)** — live | Configured as the Novu SMS integration. |
+| **Novu API key** (sign up at `https://bometfeedbackhub.digit.org/novu/` after first deploy, paste into host_vars, re-deploy) | All Novu delivery (SMS/Email) | **Phase 3** (two-pass bootstrap) | `novu-bridge` won't dispatch until `NOVU_API_KEY` resolves. Novu org **Bomet**, envs **Development + Production**. |
+| **Dedicated WhatsApp number** + QR scan + acceptance of unofficial-API/ban risk | WhatsApp | **Phase 3 (P3-2)** — paired | Pair via SSH tunnel to `/qr`; auth-state persists in `baileys_auth_data`. Validated on Hetzner IP (R9). |
+| **Gmail / SMTP** (host/port/user/pass, nodemailer) + verified from-address (SPF/DKIM) | Email | **Phase 3 (P3-3)** — live | Novu email integration. |
+| **CI/registry push access** (egov-ci → `10.0.0.4:5000`) | Building pgr-services/novu-bridge/baileys images | **Phase 1/2** | Bomet pull configured via `insecure-registries`. |
+| **Tenant-scoping** | Correct seed level | **Phase 0 — resolved** | Seed at state tenant `ke` (PGR resolves via state-level tenant). |
 
-**Minimum to start Phase 3:** SMS creds + sender ID + Novu API key. WhatsApp and email follow as their providers come online (config-only routing edits afterward).
+**As built:** all three channels are live on Bomet — SMS via Twilio, Email via Gmail/SMTP (both through Novu), WhatsApp via Baileys directly.
 
 ---
 
@@ -434,7 +434,7 @@ Goal: flip Bomet to the config-driven path channel-by-channel and verify Novu tr
 | R12 | **Strategy collision** — `WhatsAppBusinessApiProviderStrategy.supports("whatsapp")` shadows Baileys; factory order undefined. | Tighten that `supports()` to drop bare `whatsapp`; seed providerName=`baileys` explicitly (P2-3). |
 | R13 | **Test framework split** — PGR is JUnit 4, novu-bridge is JUnit 5. | New tests MUST match the host module's framework or surefire silently skips them (P1-9 JUnit 4; P2-10 JUnit 5). |
 | R14 | **Golden test exactness** — two render paths must produce byte-identical strings incl. shortener URL + date formatting (DATE_PATTERN vs DomainEvent Asia/Kolkata formatter). | Mock the URL shortener and date deterministically; restrict golden seed to SMS-only (WhatsApp is net-new, excluded from the no-op gate). |
-| R15 | **NotificationTemplate composite key** — MDMS uniqueIdentifier is a single string; real key is audience+eventName+channel+locale. | Add a synthetic single-string `code` field to the master and use it as `idField`/`x-unique` (P0-1/P0-6/P0-7). |
+| R15 | **NotificationTemplate composite key.** | **RESOLVED differently than planned.** No synthetic `code` field was added. The schema uses a native composite `x-unique = [audience, action, toState, channel, locale]` and the configurator registry just uses `idField:'action'` for display. Same flattening applies to NotificationRouting (`x-unique = [businessService, action, toState, audience, channel]`). |
 | R16 | **Ansible reverts server-side compose edits** — confirmed (`playbook-deploy.yml` re-copies compose every run). | ALL changes in committed files: `docker-compose.egov-digit.yaml` (shared), `docker-compose.bomet.yml` (Bomet-only overlay), `host_vars/bomet.yml`, `digit.env.j2`. Never `vi` on the box. Named volumes declared in tracked compose, never created manually. |
 | R17 | **`enable_tools` per-server MDMS isolation** — MDMS seeded on dev does NOT propagate to Bomet. | Seed on Bomet directly via the nairobi-mdms data path / on-host MCP; the dev-server copy is convenience only. |
 | R18 | **Confirm Bomet's actual `NOTIFICATION_ENABLE_FOR_STATUS`** (design §14) to finalize the active seed set. | Read it off the running Bomet pgr-services config in Phase 0; reconcile against §11 + the golden fixtures. |
@@ -468,3 +468,18 @@ P0 schemas+seed+scoping (≈3d)
 **Critical path ≈ 17–20 working days.** Parallelizable off the critical path: configurator (4d, after P0 schema contract), test fixtures (alongside P1), Baileys image build (alongside P1/P2 — but pairing validation R9 must happen early in P2 since it can force an architecture change). With ~2 engineers (one PGR/backend, one infra/bridge/configurator) the calendar estimate is **≈4 weeks** including the credential-gated Phase 3 channels.
 
 **The two hardest gates:** (1) the golden-output backward-compat test (P1-9) — cutover is only safe if it's green; (2) Baileys pairing on the Hetzner datacenter IP (R9) — validate before committing to WhatsApp on Bomet.
+
+---
+
+## 9. As-built deltas
+
+Built in commit `ef8b617ec` (Phases 0–2) and cut over on Bomet (Phase 3). Summary of where reality differs from the original plan above:
+
+1. **Routing flattened (the big one).** No `transitions[]` / `subscribers[]` / `channels[]`. One scalar MDMS row per `(businessService, action, toState, audience{CITIZEN|EMPLOYEE}, channel{SMS|WHATSAPP|EMAIL})`, joining **1:1** with one `NotificationTemplate` row keyed `(audience, action, toState, channel, locale)`. Bomet seed = **33 routing ↔ 33 templates** (18 CITIZEN + 15 EMPLOYEE; all 3 channels). `audience` replaces `subscribers[]`. Matching is on `action+toState`.
+2. **Seed/schema live in `default-data-handler`**, not `nairobi-mdms`, at state tenant `ke` (PGR resolves via `getStateLevelTenant`). No nairobi-mdms parity files.
+3. **No synthetic `code` field** — both masters use a native composite `x-unique`.
+4. **No `SubscriberResolver` class and no custom configurator editor.** Resolver logic stayed in `NotificationService`; the flat scalar masters render in the generic configurator datagrid. `RoutingMatch` still carries the old `subscribers/channels` arrays (PGR maps `group→audience` at emit time); collapsing it to scalar is the in-flight follow-up.
+5. **Delivery is through Novu providers for SMS/Email, direct Baileys for WhatsApp.** SMS → Novu workflow `complaints-sms` → **Twilio**; Email → `complaints-email` → **Gmail/SMTP (nodemailer)**; WhatsApp → `BaileysSendClient` → baileys-send-service (NOT through Novu). Wrapping Baileys as a Novu provider = **BACKLOG TASK-031 / GitHub egovernments/CCRS#973**; syncing Novu-edited templates back to MDMS = **TASK-030 / CCRS#972**.
+6. **Novu bootstrapped via API:** org **Bomet**, envs **Development + Production**, with the three `complaints-*` workflows (defined in `novu-bridge-endpoint/workflows.js`).
+7. **Deploy reality:** `local-setup/ansible/deploy.sh bomet`; Novu stack behind the `notifications` compose profile (`enable_novu: true`); the `PGR_NOTIFICATION_CONFIG_DRIVEN=true` flag lives in `docker-compose.bomet.yml`. Configurator built via `files/configurator-build.sh` (sub-packages first, then `vite build --base=/configurator/`) and shows a top-level **Notifications** nav section.
+8. **Build-time corrections:** REASSIGN → **PENDINGFORREASSIGNMENT** (dead `PENDINGATLME·REASSIGN` row excluded); schema `description` must be **≤ 512 chars** (MDMS column); **NovuClient has no connect/read timeout** (`new RestTemplate()` — hardening candidate); configurator must build `file:` sub-packages before vite.

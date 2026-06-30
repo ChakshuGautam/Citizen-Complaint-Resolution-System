@@ -157,12 +157,6 @@ public class PGRConstants {
     public static final String MDMS_NOTIFICATION_ROUTING_JSONPATH = "$.MdmsRes.RAINMAKER-PGR.NotificationRouting";
     public static final String MDMS_NOTIFICATION_TEMPLATE_JSONPATH = "$.MdmsRes.RAINMAKER-PGR.NotificationTemplate";
 
-    // Subscriber relationship enum (NOT RBAC roles) — must match the MDMS schema enum.
-    public static final String SUBSCRIBER_CITIZEN = "CITIZEN";
-    public static final String SUBSCRIBER_ASSIGNEE = "ASSIGNEE";
-    public static final String SUBSCRIBER_CREATOR = "CREATOR";
-    public static final String SUBSCRIBER_PREVIOUS_ASSIGNEE = "PREVIOUS_ASSIGNEE";
-
     // Channels — must match the MDMS schema enum.
     public static final String CHANNEL_SMS = "SMS";
     public static final String CHANNEL_WHATSAPP = "WHATSAPP";
@@ -171,6 +165,10 @@ public class PGRConstants {
     // Audience normalization (template lookup): any employee-type subscriber -> EMPLOYEE.
     public static final String AUDIENCE_CITIZEN = "CITIZEN";
     public static final String AUDIENCE_EMPLOYEE = "EMPLOYEE";
+
+    // Non-notifiable pseudo-audiences: workflow-internal, resolve to no recipients.
+    public static final String AUDIENCE_AUTO_ESCALATE = "AUTO_ESCALATE";
+    public static final String AUDIENCE_SYSTEM = "SYSTEM";
 
     // Per-recipient event name prefix consumed by novu-bridge.
     public static final String EVENT_NAME_PREFIX = "COMPLAINTS.WORKFLOW.";

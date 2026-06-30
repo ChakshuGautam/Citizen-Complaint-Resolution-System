@@ -4,8 +4,26 @@
     "fromState": null,
     "action": "APPLY",
     "toState": "PENDINGFORASSIGNMENT",
-    "subscribers": ["CITIZEN"],
-    "channels": ["SMS"],
+    "audience": "CITIZEN",
+    "channel": "SMS",
+    "active": true
+  },
+  {
+    "businessService": "PGR",
+    "fromState": null,
+    "action": "APPLY",
+    "toState": "PENDINGFORASSIGNMENT",
+    "audience": "CITIZEN",
+    "channel": "WHATSAPP",
+    "active": true
+  },
+  {
+    "businessService": "PGR",
+    "fromState": null,
+    "action": "APPLY",
+    "toState": "PENDINGFORASSIGNMENT",
+    "audience": "CITIZEN",
+    "channel": "EMAIL",
     "active": true
   },
   {
@@ -13,8 +31,53 @@
     "fromState": null,
     "action": "ASSIGN",
     "toState": "PENDINGATLME",
-    "subscribers": ["CITIZEN", "ASSIGNEE"],
-    "channels": ["SMS"],
+    "audience": "CITIZEN",
+    "channel": "SMS",
+    "active": true
+  },
+  {
+    "businessService": "PGR",
+    "fromState": null,
+    "action": "ASSIGN",
+    "toState": "PENDINGATLME",
+    "audience": "CITIZEN",
+    "channel": "WHATSAPP",
+    "active": true
+  },
+  {
+    "businessService": "PGR",
+    "fromState": null,
+    "action": "ASSIGN",
+    "toState": "PENDINGATLME",
+    "audience": "CITIZEN",
+    "channel": "EMAIL",
+    "active": true
+  },
+  {
+    "businessService": "PGR",
+    "fromState": null,
+    "action": "ASSIGN",
+    "toState": "PENDINGATLME",
+    "audience": "EMPLOYEE",
+    "channel": "SMS",
+    "active": true
+  },
+  {
+    "businessService": "PGR",
+    "fromState": null,
+    "action": "ASSIGN",
+    "toState": "PENDINGATLME",
+    "audience": "EMPLOYEE",
+    "channel": "WHATSAPP",
+    "active": true
+  },
+  {
+    "businessService": "PGR",
+    "fromState": null,
+    "action": "ASSIGN",
+    "toState": "PENDINGATLME",
+    "audience": "EMPLOYEE",
+    "channel": "EMAIL",
     "active": true
   },
   {
@@ -22,8 +85,53 @@
     "fromState": "PENDINGATLME",
     "action": "REASSIGN",
     "toState": "PENDINGFORREASSIGNMENT",
-    "subscribers": ["CITIZEN", "ASSIGNEE"],
-    "channels": ["SMS"],
+    "audience": "CITIZEN",
+    "channel": "SMS",
+    "active": true
+  },
+  {
+    "businessService": "PGR",
+    "fromState": "PENDINGATLME",
+    "action": "REASSIGN",
+    "toState": "PENDINGFORREASSIGNMENT",
+    "audience": "CITIZEN",
+    "channel": "WHATSAPP",
+    "active": true
+  },
+  {
+    "businessService": "PGR",
+    "fromState": "PENDINGATLME",
+    "action": "REASSIGN",
+    "toState": "PENDINGFORREASSIGNMENT",
+    "audience": "CITIZEN",
+    "channel": "EMAIL",
+    "active": true
+  },
+  {
+    "businessService": "PGR",
+    "fromState": "PENDINGATLME",
+    "action": "REASSIGN",
+    "toState": "PENDINGFORREASSIGNMENT",
+    "audience": "EMPLOYEE",
+    "channel": "SMS",
+    "active": true
+  },
+  {
+    "businessService": "PGR",
+    "fromState": "PENDINGATLME",
+    "action": "REASSIGN",
+    "toState": "PENDINGFORREASSIGNMENT",
+    "audience": "EMPLOYEE",
+    "channel": "WHATSAPP",
+    "active": true
+  },
+  {
+    "businessService": "PGR",
+    "fromState": "PENDINGATLME",
+    "action": "REASSIGN",
+    "toState": "PENDINGFORREASSIGNMENT",
+    "audience": "EMPLOYEE",
+    "channel": "EMAIL",
     "active": true
   },
   {
@@ -31,8 +139,26 @@
     "fromState": null,
     "action": "REJECT",
     "toState": "REJECTED",
-    "subscribers": ["CITIZEN"],
-    "channels": ["SMS"],
+    "audience": "CITIZEN",
+    "channel": "SMS",
+    "active": true
+  },
+  {
+    "businessService": "PGR",
+    "fromState": null,
+    "action": "REJECT",
+    "toState": "REJECTED",
+    "audience": "CITIZEN",
+    "channel": "WHATSAPP",
+    "active": true
+  },
+  {
+    "businessService": "PGR",
+    "fromState": null,
+    "action": "REJECT",
+    "toState": "REJECTED",
+    "audience": "CITIZEN",
+    "channel": "EMAIL",
     "active": true
   },
   {
@@ -40,8 +166,26 @@
     "fromState": "PENDINGATLME",
     "action": "RESOLVE",
     "toState": "RESOLVED",
-    "subscribers": ["CITIZEN"],
-    "channels": ["SMS"],
+    "audience": "CITIZEN",
+    "channel": "SMS",
+    "active": true
+  },
+  {
+    "businessService": "PGR",
+    "fromState": "PENDINGATLME",
+    "action": "RESOLVE",
+    "toState": "RESOLVED",
+    "audience": "CITIZEN",
+    "channel": "WHATSAPP",
+    "active": true
+  },
+  {
+    "businessService": "PGR",
+    "fromState": "PENDINGATLME",
+    "action": "RESOLVE",
+    "toState": "RESOLVED",
+    "audience": "CITIZEN",
+    "channel": "EMAIL",
     "active": true
   },
   {
@@ -49,8 +193,53 @@
     "fromState": null,
     "action": "REOPEN",
     "toState": "PENDINGFORASSIGNMENT",
-    "subscribers": ["CITIZEN", "ASSIGNEE"],
-    "channels": ["SMS"],
+    "audience": "CITIZEN",
+    "channel": "SMS",
+    "active": true
+  },
+  {
+    "businessService": "PGR",
+    "fromState": null,
+    "action": "REOPEN",
+    "toState": "PENDINGFORASSIGNMENT",
+    "audience": "CITIZEN",
+    "channel": "WHATSAPP",
+    "active": true
+  },
+  {
+    "businessService": "PGR",
+    "fromState": null,
+    "action": "REOPEN",
+    "toState": "PENDINGFORASSIGNMENT",
+    "audience": "CITIZEN",
+    "channel": "EMAIL",
+    "active": true
+  },
+  {
+    "businessService": "PGR",
+    "fromState": null,
+    "action": "REOPEN",
+    "toState": "PENDINGFORASSIGNMENT",
+    "audience": "EMPLOYEE",
+    "channel": "SMS",
+    "active": true
+  },
+  {
+    "businessService": "PGR",
+    "fromState": null,
+    "action": "REOPEN",
+    "toState": "PENDINGFORASSIGNMENT",
+    "audience": "EMPLOYEE",
+    "channel": "WHATSAPP",
+    "active": true
+  },
+  {
+    "businessService": "PGR",
+    "fromState": null,
+    "action": "REOPEN",
+    "toState": "PENDINGFORASSIGNMENT",
+    "audience": "EMPLOYEE",
+    "channel": "EMAIL",
     "active": true
   },
   {
@@ -58,8 +247,26 @@
     "fromState": "RESOLVED",
     "action": "RATE",
     "toState": "CLOSEDAFTERRESOLUTION",
-    "subscribers": ["ASSIGNEE"],
-    "channels": ["SMS"],
+    "audience": "EMPLOYEE",
+    "channel": "SMS",
+    "active": true
+  },
+  {
+    "businessService": "PGR",
+    "fromState": "RESOLVED",
+    "action": "RATE",
+    "toState": "CLOSEDAFTERRESOLUTION",
+    "audience": "EMPLOYEE",
+    "channel": "WHATSAPP",
+    "active": true
+  },
+  {
+    "businessService": "PGR",
+    "fromState": "RESOLVED",
+    "action": "RATE",
+    "toState": "CLOSEDAFTERRESOLUTION",
+    "audience": "EMPLOYEE",
+    "channel": "EMAIL",
     "active": true
   },
   {
@@ -67,8 +274,26 @@
     "fromState": "REJECTED",
     "action": "RATE",
     "toState": "CLOSEDAFTERREJECTION",
-    "subscribers": ["ASSIGNEE"],
-    "channels": ["SMS"],
+    "audience": "EMPLOYEE",
+    "channel": "SMS",
+    "active": true
+  },
+  {
+    "businessService": "PGR",
+    "fromState": "REJECTED",
+    "action": "RATE",
+    "toState": "CLOSEDAFTERREJECTION",
+    "audience": "EMPLOYEE",
+    "channel": "WHATSAPP",
+    "active": true
+  },
+  {
+    "businessService": "PGR",
+    "fromState": "REJECTED",
+    "action": "RATE",
+    "toState": "CLOSEDAFTERREJECTION",
+    "audience": "EMPLOYEE",
+    "channel": "EMAIL",
     "active": true
   }
 ]

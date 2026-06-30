@@ -205,6 +205,45 @@ function checkAuth(req, res) {
   return true;
 }
 
+// Human-facing pairing page: shows the QR, auto-refreshes it (Baileys rotates the
+// QR every ~20s), and flips to "connected" once the phone scans it. Served at the
+// root so it can be published behind a domain for browser-based login.
+app.get('/', (req, res) => {
+  res.type('html').send(`<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DIGIT WhatsApp pairing</title>
+<style>
+  body{font-family:system-ui,sans-serif;text-align:center;background:#0b141a;color:#e9edef;margin:0;padding:2rem}
+  h1{font-size:1.3rem;font-weight:600} .card{max-width:420px;margin:1.5rem auto;background:#111b21;border-radius:14px;padding:1.5rem}
+  img{width:280px;height:280px;background:#fff;border-radius:8px;padding:8px} .muted{color:#8696a0;font-size:.9rem}
+  .ok{color:#00a884;font-size:1.1rem;font-weight:600} .state{margin-top:.5rem}
+</style></head>
+<body>
+  <h1>DIGIT · Link WhatsApp (Baileys)</h1>
+  <div class="card">
+    <div id="content"><p class="muted">Loading QR…</p></div>
+    <div class="state muted" id="state"></div>
+  </div>
+  <p class="muted">Open WhatsApp → Settings → Linked Devices → Link a device, then scan.</p>
+<script>
+async function tick(){
+  try{
+    const h = await fetch('/healthz').then(r=>r.json()).catch(()=>({}));
+    const st = document.getElementById('state');
+    if(h && h.ok){
+      document.getElementById('content').innerHTML='<p class="ok">✅ Connected — WhatsApp is linked.</p>';
+      st.textContent='state: '+(h.state||'open'); return; // stop refreshing
+    }
+    st.textContent='state: '+((h&&h.state)||'connecting');
+    document.getElementById('content').innerHTML='<img alt="QR" src="/qr?ts='+Date.now()+'">';
+  }catch(e){ document.getElementById('state').textContent='error: '+e; }
+  setTimeout(tick, 5000);
+}
+tick();
+</script>
+</body></html>`);
+});
+
 // Liveness/readiness: 200 only when the socket is paired and open.
 app.get('/healthz', (req, res) => {
   if (isReady()) {

@@ -196,14 +196,12 @@ public class NotificationGoldenOutputTest {
         Set<String> out = new LinkedHashSet<>();
         List<RoutingMatch> matches = router.route(TENANT, "PGR", null, action, toState);
         for (RoutingMatch match : matches) {
-            if (!match.getChannels().contains(CHANNEL_SMS)) continue;
-            for (String group : match.getSubscribers()) {
-                String audience = AUDIENCE_CITIZEN.equals(group) ? AUDIENCE_CITIZEN : AUDIENCE_EMPLOYEE;
-                String body = renderer.render(TENANT, audience, action, toState,
-                        CHANNEL_SMS, LOCALE, placeholderValues);
-                if (body != null) {
-                    out.add(key(audience, CHANNEL_SMS, body));
-                }
+            if (!CHANNEL_SMS.equals(match.getChannel())) continue;
+            String audience = match.getAudience();
+            String body = renderer.render(TENANT, audience, action, toState,
+                    CHANNEL_SMS, LOCALE, placeholderValues);
+            if (body != null) {
+                out.add(key(audience, CHANNEL_SMS, body));
             }
         }
         return out;
@@ -218,14 +216,12 @@ public class NotificationGoldenOutputTest {
         Set<String> out = new LinkedHashSet<>();
         List<RoutingMatch> matches = router.route(TENANT, "PGR", null, action, toState);
         for (RoutingMatch match : matches) {
-            if (!match.getChannels().contains(CHANNEL_SMS)) continue;
-            for (String group : match.getSubscribers()) {
-                String role = AUDIENCE_CITIZEN.equals(group) ? AUDIENCE_CITIZEN : AUDIENCE_EMPLOYEE;
-                String raw = legacyUtil.getCustomizedMsg(action, toState, role, legacyLocalizationJson);
-                assertNotNull(raw, "legacy localization missing body for role=" + role
-                        + " code=PGR_" + role + "_" + action + "_" + toState + "_SMS_MESSAGE");
-                out.add(key(role, CHANNEL_SMS, substitute(raw, placeholderValues)));
-            }
+            if (!CHANNEL_SMS.equals(match.getChannel())) continue;
+            String role = match.getAudience();
+            String raw = legacyUtil.getCustomizedMsg(action, toState, role, legacyLocalizationJson);
+            assertNotNull(raw, "legacy localization missing body for role=" + role
+                    + " code=PGR_" + role + "_" + action + "_" + toState + "_SMS_MESSAGE");
+            out.add(key(role, CHANNEL_SMS, substitute(raw, placeholderValues)));
         }
         return out;
     }
