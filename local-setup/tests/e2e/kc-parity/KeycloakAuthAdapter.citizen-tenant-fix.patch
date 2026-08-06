@@ -1,0 +1,29 @@
+--- /opt/ccrs/digit-ui-esbuild-kc/packages/libraries/src/services/auth/KeycloakAuthAdapter.js.bak-tenantfix	2026-08-06 03:12:58.704230651 +0000
++++ /opt/ccrs/digit-ui-esbuild-kc/packages/libraries/src/services/auth/KeycloakAuthAdapter.js	2026-08-06 03:12:58.705230653 +0000
+@@ -294,8 +294,16 @@
+     console.log("[KC-AUTH] _digitUserType=" + this._digitUserType + " _digitRoles=" + JSON.stringify(this._digitRoles));
+     console.log("[KC-AUTH] realm_access.roles=" + JSON.stringify(parsed.realm_access?.roles));
+     const stateTenant = window?.globalConfigs?.getConfig("STATE_LEVEL_TENANT_ID") || "pg";
+-    const defaultCityTenant = stateTenant + ".citya"; // TODO: make configurable
+-    const tenantId = this._tenantId || defaultCityTenant;
++    const defaultCityTenant = stateTenant + ".citya";
++    // The overlay has already resolved the real DIGIT user, so trust its tenant.
++    // A citizen signing in through Keycloak never sees the employee tenant
++    // dropdown, so this._tenantId is null for them and the session used to fall
++    // through to a synthesized "<state>.citya" that exists in no real deployment
++    // (on Bomet: pg.citya). Every downstream boundary lookup then offered demo
++    // wards, and PGR rejected the resulting complaint with a 400.
++    const du = this._digitUser;
++    const tenantId =
++      this._tenantId || (du && (du.permanentCity || du.tenantId)) || defaultCityTenant;
+ 
+     const isEmployee = this._digitUserType === "EMPLOYEE";
+     const userType = isEmployee ? "EMPLOYEE" : "CITIZEN";
+@@ -317,7 +325,6 @@
+     // JWT claims alone drops id/userName/mobileNumber/locale/permanentCity/active,
+     // and DIGIT components branch on those — e.g. the notification widget issues
+     // an extra events/notifications/_count that native auth never makes.
+-    const du = this._digitUser;
+     // Project to exactly the fields native DIGIT auth persists — spreading the
+     // whole user record would leak PII (dob, aadhaarNumber, photo, ...) into
+     // localStorage that the default UI never stores.
