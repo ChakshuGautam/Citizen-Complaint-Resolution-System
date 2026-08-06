@@ -1,0 +1,24 @@
+--- /opt/token-exchange-src/src/server.ts.bak-boundaryfix	2026-08-06 03:31:40.366695022 +0000
++++ /opt/token-exchange-src/src/server.ts	2026-08-06 03:31:40.366695022 +0000
+@@ -133,8 +133,19 @@
+   app.use((req, _res, next) => {
+     if (!req.path.startsWith("/boundary-service/")) return next();
+ 
+-    const stateTenant = config.digitSystemTenant;  // "pg"
+-    const cityTenant = config.digitDefaultTenant;   // "pg.citya"
++    const stateTenant = config.digitSystemTenant;  // e.g. "pg"
++    const cityTenant = config.digitDefaultTenant;   // e.g. "pg.citya"
++
++    // Only apply this compatibility rewrite when the configured city tenant
++    // actually belongs to this deployment's state tenant. On the pg demo
++    // ("pg" + "pg.citya") it does. Where DIGIT_DEFAULT_TENANT was never set the
++    // "pg.citya" default survives, and rewriting an already-correct tenantId
++    // (here "ke") to it made the citizen wizard offer another tenant's demo
++    // wards; PGR then rejected the complaint with INVALID_BOUNDARY_CODE.
++    // Forcing boundaryType=City is equally deployment-specific - Bomet's
++    // hierarchy is rooted at County, so it filtered every real node away.
++    if (!cityTenant.startsWith(stateTenant + ".")) return next();
++
+     let urlChanged = false;
+ 
+     // Fix URL query param: tenantId=pg → tenantId=pg.citya for relationship searches

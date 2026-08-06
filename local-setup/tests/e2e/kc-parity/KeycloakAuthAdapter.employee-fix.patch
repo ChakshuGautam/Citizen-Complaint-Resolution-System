@@ -1,0 +1,109 @@
+--- /opt/ccrs/digit-ui-esbuild/packages/libraries/src/services/auth/KeycloakAuthAdapter.js	2026-06-05 02:39:43.361991110 +0000
++++ /opt/ccrs/digit-ui-esbuild-kc/packages/libraries/src/services/auth/KeycloakAuthAdapter.js	2026-08-05 19:54:37.082685088 +0000
+@@ -23,6 +23,7 @@
+     this._tenantId = null;
+     this._digitUserType = null;
+     this._digitRoles = null;
++    this._digitUser = null;
+   }
+ 
+   async init() {
+@@ -157,6 +158,19 @@
+     }
+ 
+     const tokens = await resp.json();
++    // token-exchange-svc resolves the DIGIT user for us and returns its type +
++    // roles beside the OIDC tokens. Without this the adapter has no way to know
++    // an EMPLOYEE is an EMPLOYEE (the KC JWT carries no DIGIT user type), so it
++    // silently degrades every SSO user to CITIZEN. Persist it too: login ends in
++    // window.location.replace(), which discards all in-memory adapter state.
++    this._digitUserType = tokens.digit_user_type || null;
++    this._digitRoles = Array.isArray(tokens.digit_roles) ? tokens.digit_roles : null;
++    this._digitUser = tokens.digit_user || null;
++    try {
++      if (this._digitUserType) window.localStorage.setItem("kc_digit_user_type", this._digitUserType);
++      if (this._digitRoles) window.localStorage.setItem("kc_digit_roles", JSON.stringify(this._digitRoles));
++      if (this._digitUser) window.localStorage.setItem("kc_digit_user", JSON.stringify(this._digitUser));
++    } catch (e) { /* storage unavailable — fall back to KC realm roles */ }
+     this._setTokens(tokens.access_token, tokens.refresh_token, tokens.id_token);
+ 
+     await this._loadUserFromToken();
+@@ -199,6 +213,7 @@
+     this._tenantId = null;
+     this._digitUserType = null;
+     this._digitRoles = null;
++    this._digitUser = null;
+ 
+     // Grab id_token_hint before clearing storage (needed for KC to skip confirmation page)
+     const idTokenHint = this._kc?.idToken
+@@ -256,6 +271,24 @@
+       return;
+     }
+ 
++    // Runs again on the page that login() redirected to, where this adapter is a
++    // brand-new instance — restore the DIGIT identity captured at login.
++    if (!this._digitUserType) {
++      try { this._digitUserType = window.localStorage.getItem("kc_digit_user_type") || null; } catch (e) { /* ignore */ }
++    }
++    if (!this._digitRoles || this._digitRoles.length === 0) {
++      try {
++        const stored = window.localStorage.getItem("kc_digit_roles");
++        this._digitRoles = stored ? JSON.parse(stored) : null;
++      } catch (e) { this._digitRoles = null; }
++    }
++    if (!this._digitUser) {
++      try {
++        const storedUser = window.localStorage.getItem("kc_digit_user");
++        this._digitUser = storedUser ? JSON.parse(storedUser) : null;
++      } catch (e) { this._digitUser = null; }
++    }
++
+     const parsed = this._kc.tokenParsed;
+     console.log("[KC-AUTH] _loadUserFromToken: sub=" + parsed.sub + " email=" + parsed.email);
+     console.log("[KC-AUTH] _digitUserType=" + this._digitUserType + " _digitRoles=" + JSON.stringify(this._digitRoles));
+@@ -280,7 +313,28 @@
+           code, name: code, tenantId,
+         }));
+ 
+-    this._user = {
++    // Prefer the real DIGIT user the overlay resolved. Building the session from
++    // JWT claims alone drops id/userName/mobileNumber/locale/permanentCity/active,
++    // and DIGIT components branch on those — e.g. the notification widget issues
++    // an extra events/notifications/_count that native auth never makes.
++    const du = this._digitUser;
++    // Project to exactly the fields native DIGIT auth persists — spreading the
++    // whole user record would leak PII (dob, aadhaarNumber, photo, ...) into
++    // localStorage that the default UI never stores.
++    this._user = du ? {
++      uuid: du.uuid || parsed.sub,
++      id: du.id,
++      userName: du.userName,
++      name: du.name,
++      mobileNumber: du.mobileNumber,
++      emailId: du.emailId,
++      locale: du.locale,
++      active: du.active,
++      permanentCity: du.permanentCity,
++      roles,
++      tenantId: du.tenantId || tenantId,
++      type: userType,
++    } : {
+       uuid: parsed.sub,
+       email: parsed.email,
+       name: parsed.name || parsed.preferred_username || parsed.email,
+@@ -323,9 +377,12 @@
+       window.localStorage.setItem("Citizen.token", this._kc.token);
+       window.localStorage.setItem("Citizen.user-info", JSON.stringify(sessionUser.info));
+       window.localStorage.setItem("Citizen.tenant-id", tenantId);
+-      if (!Digit.SessionStorage.get("CITIZEN.COMMON.HOME.CITY")) {
+-        Digit.SessionStorage.set("CITIZEN.COMMON.HOME.CITY", { code: tenantId });
+-      }
++      // Deliberately NOT seeding CITIZEN.COMMON.HOME.CITY. Native citizen login
++      // leaves the home city unselected, and TopBar gates its notification-count
++      // request on getCitizenCurrentTenant(true) — i.e. on that key existing. So
++      // presetting it made the SSO session issue an events/notifications/_count
++      // that the default UI never sends. Let the citizen pick a home city through
++      // the normal flow, exactly as under native auth.
+     }
+   }
+ }
