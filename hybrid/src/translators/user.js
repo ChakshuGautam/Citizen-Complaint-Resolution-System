@@ -112,12 +112,25 @@
 // =====================================================================
 // WHAT v3's INDIVIDUAL CANNOT EXPRESS (each one is in gaps.jsonl)
 // =====================================================================
-//  * NO ROLES. CCRS's User carries roles[] and the whole PGR authorisation
-//    model reads them. The v3 Individual schema has no roles field and the
-//    service REJECTS one ("unknown field \"roles\"" - 400). Roles live in
-//    Keycloak realm roles (d3-individual is configured with
+//  * NO ROLES. CCRS's User carries roles[]. The v3 Individual schema has no
+//    roles field and the service REJECTS one ("unknown field \"roles\"" - 400).
+//    Roles live in Keycloak realm roles (d3-individual is configured with
 //    KEYCLOAK_ASSIGNABLE_ROLES=ASSIGNER,CITIZEN), which is a different system
 //    with a different API and no tenant-scoped role codes of CCRS's shape.
+//    So the SEARCH path answers roles: [] and type: null - it reports what v3
+//    reports, which is nothing, rather than stamping a plausible "CITIZEN" on
+//    every individual including employees.
+//    WHAT THAT COSTS, traced rather than assumed: pgr-services' authorisation
+//    does NOT read this. Every role/type check - PGRService.hasAnyRole:438
+//    (confidential-field masking), Principals.isPureCitizen:55,
+//    RoleCodes.normalize:29, EmployeeContextService:154, PolicyInputBuilder:27,
+//    PolicyDrivenScopeResolver:86 - takes
+//    org.egov.common.contract.request.User, i.e. RequestInfo.userInfo, filled
+//    by the GATEWAY from the 2.x token, which EGOV_USER_HOST does not move.
+//    The shim answers into org.egov.pgr.web.models.User, a DIFFERENT class.
+//    Exactly one consumer reads roles off it: getFirstRoleNameByUuid:241 ->
+//    ComplaintDomainEventService.getAssigneeName:226, a display string on an
+//    outbound event that falls back to "NA". Nothing reads its `type` at all.
 //  * NO USER TYPE. CITIZEN / EMPLOYEE / SYSTEM does not exist in v3. Every 2.x
 //    user search carries `userType` as a FILTER; v3 cannot apply it, so the
 //    search is silently widened. An employee's individual record would come
@@ -752,9 +765,16 @@ function updateToV3(req2x) {
 
 // v3 Individual -> CCRS User. CCRS needs id, uuid, userName, mobileNumber,
 // type, roles[] and tenantId; v3 supplies exactly two of those seven.
+// `requested` is supplied ONLY on the create path, where it is the User object
+// CCRS just sent us. There it is an ECHO - reporting back what the caller
+// asserted, which v3 accepted and discarded. On the SEARCH path there is no
+// such caller assertion, so nothing is echoed and nothing is invented: roles
+// come back EMPTY and type comes back NULL. See the roles gap entry for why
+// that is the right answer rather than a stamped "CITIZEN".
 function mapIndividualToUser(ind, req2x, tenantId, requested) {
   const src = ind && typeof ind === 'object' ? ind : {};
-  const want = requested && typeof requested === 'object' ? requested : {};
+  const isEcho = !!(requested && typeof requested === 'object');
+  const want = isEcho ? requested : {};
 
   // The live service returns flat givenName/familyName. The task brief's own
   // contract test supplies a nested {name:{givenName}}, so both are read.
@@ -779,41 +799,94 @@ function mapIndividualToUser(ind, req2x, tenantId, requested) {
       'means something else.',
   });
 
-  gaplog.record({
-    dep: DEP,
-    field: 'user.type',
-    action: 'faked',
-    detail:
-      `Emitted type="${want.type || 'CITIZEN'}". v3's Individual has NO user type - the field is ` +
-      'rejected on create as an unknown field - so this is not read from the answer, it is ' +
-      'asserted by the shim. pgr-services checks it in anger: ' +
-      'ServiceRequestValidator.validateSearchParam:294 picks the allowed search parameters from ' +
-      'it and throws "INVALID SEARCH: The userType ... does not have any search config" for an ' +
-      'unrecognised value, and EnrichmentService:63 only stamps accountId for a CITIZEN. The real ' +
-      'value lives in Keycloak as a realm role (d3-individual: ' +
-      'KEYCLOAK_ASSIGNABLE_ROLES=ASSIGNER,CITIZEN), reachable only by a second call to a second ' +
-      'service.',
-  });
+  if (isEcho) {
+    gaplog.record({
+      dep: DEP,
+      field: 'user.type',
+      action: 'faked',
+      detail:
+        `Create path: echoed type="${want.type || null}" straight back from the CreateUserRequest. ` +
+        "v3's Individual has NO user type - the field is REJECTED on create as an unknown field - " +
+        'so this is not read from the answer, it is the caller\'s own assertion handed back. ' +
+        'The person now exists in the registry with no type recorded anywhere. In DIGIT 3.0 the ' +
+        'CITIZEN/EMPLOYEE distinction is a Keycloak realm role (d3-individual: ' +
+        'KEYCLOAK_ASSIGNABLE_ROLES=ASSIGNER,CITIZEN), so a migration must create the Keycloak user ' +
+        'alongside the individual - two writes to two services, which a one-request-in / ' +
+        'one-request-out translator cannot perform.',
+    });
+  } else {
+    gaplog.record({
+      dep: DEP,
+      field: 'user.type',
+      action: 'dropped',
+      detail:
+        'Search path: type emitted as NULL, because v3 does not report one and the shim will not ' +
+        'invent one. The v3 Individual schema has no user type at all (it is REJECTED on create as ' +
+        'an unknown field), so any value here would be fabricated. An earlier revision stamped ' +
+        '"CITIZEN" on every individual a search returned, which would have labelled EMPLOYEES as ' +
+        'citizens; that is now fixed. ' +
+        'BLAST RADIUS OF THE NULL, traced exhaustively: NOTHING in pgr-services branches on the ' +
+        'type of a user returned by the user service. Every `.getType()` call site - ' +
+        'Principals.isPureCitizen:66, EmployeeContextService:69, PolicyInputBuilder:48, ' +
+        'ServiceRequestValidator:133/245/290-307, EnrichmentService:63 - reads ' +
+        'org.egov.common.contract.request.User, i.e. RequestInfo.userInfo, which the GATEWAY fills ' +
+        'from the 2.x token and which EGOV_USER_HOST does not move. The shim answers into ' +
+        'org.egov.pgr.web.models.User, a different class, whose `type` is serialised onto ' +
+        'service.citizen and never read. ' +
+        'THE REAL MIGRATION REQUIREMENT: user type must be sourced from Keycloak realm roles.',
+    });
+  }
 
-  const roles = Array.isArray(want.roles) && want.roles.length
-    ? want.roles
-    : [{ code: 'CITIZEN', name: 'Citizen', tenantId: tenantId || null }];
-  gaplog.record({
-    dep: DEP,
-    field: 'user.roles[]',
-    action: 'faked',
-    detail:
-      `Emitted roles=${JSON.stringify(roles)}. NOTHING IN v3 REPORTED THIS. The individual ` +
-      'registry has no roles field and rejects one on create, so the shim asserts the CITIZEN ' +
-      'role that UserUtils.getCitizenRole:129 would have stamped anyway (or echoes the roles the ' +
-      'caller just sent on a create). This is the single most dangerous fake in the whole shim: ' +
-      "CCRS's authorisation reads User.roles - PGRService:533 and " +
-      'UserService.getFirstRoleNameByUuid:236 among others - so a wrong answer here is a ' +
-      'privilege decision made on invented data. The real roles are Keycloak realm roles on the ' +
-      'Keycloak user linked to this individual; fetching them needs the Keycloak admin API, a ' +
-      'second service with its own credentials, and a 2.x-role -> realm-role mapping that nobody ' +
-      'has written.',
-  });
+  const roles = isEcho && Array.isArray(want.roles) && want.roles.length ? want.roles : [];
+  if (isEcho) {
+    gaplog.record({
+      dep: DEP,
+      field: 'user.roles[]',
+      action: 'faked',
+      detail:
+        `Create path: echoed roles=${JSON.stringify(roles)} straight back from the ` +
+        'CreateUserRequest (UserUtils.addUserDefaultFields:116 stamps CITIZEN before sending). ' +
+        'NOTHING IN v3 REPORTED THIS: the individual registry has no roles field and REJECTS one ' +
+        'on create (400 unknown field "roles"), so the person is created with no authorisation at ' +
+        'all. The echo is harmless here - UserService.upsertUser:97 reads only .getUuid() from ' +
+        'this reply - but it is still the caller hearing its own assertion back. Real roles are ' +
+        'Keycloak realm roles against a Keycloak user linked to the individual.',
+    });
+  } else {
+    gaplog.record({
+      dep: DEP,
+      field: 'user.roles[]',
+      action: 'dropped',
+      detail:
+        'Search path: roles emitted as an EMPTY LIST, because v3 does not report them and the shim ' +
+        'will not invent them. The v3 Individual schema has no roles field and REJECTS one on ' +
+        'create (400 unknown field "roles"). An earlier revision stamped ' +
+        '[{code:"CITIZEN",name:"Citizen"}] on every individual a search returned, which meant ' +
+        'UserService.getFirstRoleNameByUuid(<an employee uuid>) answered "Citizen"; that is now ' +
+        'fixed. ' +
+        'BLAST RADIUS OF THE EMPTY LIST, traced exhaustively rather than assumed: there is exactly ' +
+        'ONE consumer of roles on a user the USER SERVICE returned - ' +
+        'UserService.getFirstRoleNameByUuid:241, whose single caller is ' +
+        'ComplaintDomainEventService.getAssigneeName:226, a DISPLAY STRING on an outbound domain ' +
+        'event. It is null-tolerant on both hops (getFirstRoleNameByUuid returns null for an empty ' +
+        'list; getAssigneeName falls back to "NA"), so the effect is a domain event reading ' +
+        'assignee "NA" instead of a role name. ' +
+        'THIS IS NOT A PRIVILEGE PATH, and an earlier revision of this entry wrongly implied it ' +
+        'was. Every authorisation site reads org.egov.common.contract.request.User from ' +
+        'RequestInfo.userInfo - PGRService.hasAnyRole:438-442 (behind ' +
+        'isAuthorizedForConfidential:531, the confidential-field masking check), ' +
+        'Principals.isPureCitizen:55, RoleCodes.normalize:29 (MDMSUtils:809, ' +
+        'AnalyticsCapabilityService:43, AccessPolicyRegistry:493, PolicyDrivenScopeResolver:171 ' +
+        'via requestInfo.getUserInfo() at :86), EmployeeContextService:154, PolicyInputBuilder:27. ' +
+        'That object is filled by the GATEWAY from the 2.x token, and the gateway validates ' +
+        'sessions through its own upstream, NOT through EGOV_USER_HOST - so the shim response can ' +
+        'never reach a privilege decision. It is a different Java class (the shim answers into ' +
+        'org.egov.pgr.web.models.User) and it is structurally unable to get there. ' +
+        'THE REAL MIGRATION REQUIREMENT stands: CCRS roles must be sourced from Keycloak realm ' +
+        'roles, which needs the Keycloak admin API, its own credentials, and a ' +
+        '2.x-role -> realm-role mapping nobody has written.',
+    });
+  }
 
   gaplog.record({
     dep: DEP,
@@ -860,7 +933,7 @@ function mapIndividualToUser(ind, req2x, tenantId, requested) {
     uuid: src.id === undefined ? null : src.id,
     userName: mobileNumber,
     name,
-    type: want.type || 'CITIZEN',
+    type: isEcho ? (want.type === undefined ? null : want.type) : null,
     mobileNumber,
     emailId: src.email === undefined ? null : src.email,
     roles,

@@ -155,22 +155,43 @@ const entries = [
   },
   {
     field: 'User.roles[] / User.type',
-    action: 'faked',
+    action: 'dropped',
     detail:
-      'CCRS needs seven fields on a User - id, uuid, userName, mobileNumber, type, roles[], tenantId ' +
-      '- and the v3 Individual reports exactly two of them (uuid as `id`, mobileNumber). `roles`, ' +
-      '`type` and `userName` are not merely absent: the create endpoint REJECTS all three as unknown ' +
-      'fields (400 unknown field "userName"). So a citizen created through v3 exists as a person and ' +
-      'as nothing else - no login, no authorisation, no user type. In DIGIT 3.0 those live in ' +
-      'Keycloak realm roles against a Keycloak user (d3-individual: KEYCLOAK_ENABLED=true, ' +
-      'KEYCLOAK_ASSIGNABLE_ROLES=ASSIGNER,CITIZEN), a second service with its own admin API and its ' +
-      'own credentials. The shim asserts type="CITIZEN" and roles=[{CITIZEN}] on every reply because ' +
-      'pgr-services cannot function without them - ServiceRequestValidator.validateSearchParam:294 ' +
-      'throws "INVALID SEARCH: The userType ... does not have any search config" on an unrecognised ' +
-      'type, and PGRService:533 and UserService.getFirstRoleNameByUuid:236 make authorisation ' +
-      'decisions from roles. Those are privilege decisions taken on data the shim invented. A real ' +
-      'cutover must resolve them from Keycloak, which means a 2.x-role -> realm-role mapping nobody ' +
-      'has written and a per-request call to a second service.',
+      'SUPERSEDES an earlier entry with the same field name, which overstated the danger and is ' +
+      'corrected here. CCRS needs seven fields on a User - id, uuid, userName, mobileNumber, type, ' +
+      'roles[], tenantId - and the v3 Individual reports exactly two of them (uuid as `id`, ' +
+      'mobileNumber). `roles`, `type` and `userName` are not merely absent: the create endpoint ' +
+      'REJECTS all three as unknown fields (400 unknown field "userName"). So a citizen created ' +
+      'through v3 exists as a person and as nothing else - no login, no authorisation, no user ' +
+      'type. In DIGIT 3.0 those live in Keycloak realm roles against a Keycloak user ' +
+      '(d3-individual: KEYCLOAK_ENABLED=true, KEYCLOAK_ASSIGNABLE_ROLES=ASSIGNER,CITIZEN), a ' +
+      'second service with its own admin API and its own credentials. ' +
+      'WHAT THE SHIM DOES ABOUT IT: on the SEARCH path it reports roles: [] and type: null - it ' +
+      'reports what v3 reports, which is nothing. An earlier revision stamped ' +
+      '[{code:"CITIZEN"}] / "CITIZEN" on every individual a search returned, which would have ' +
+      'labelled EMPLOYEES as citizens; that is fixed. On the CREATE path it echoes back the roles ' +
+      'and type the caller itself just sent, which is the caller hearing its own assertion, not an ' +
+      'invention (and UserService.upsertUser:97 reads only .getUuid() from that reply anyway). ' +
+      'BLAST RADIUS, TRACED EXHAUSTIVELY RATHER THAN ASSUMED - AND THIS IS THE CORRECTION: this is ' +
+      'NOT a privilege path. pgr-services has exactly ONE consumer of roles on a user the USER ' +
+      'SERVICE returned: UserService.getFirstRoleNameByUuid:241, whose single caller is ' +
+      'ComplaintDomainEventService.getAssigneeName:226 - a DISPLAY STRING on an outbound domain ' +
+      'event, null-tolerant on both hops (empty roles -> null -> the literal "NA"). Nothing reads ' +
+      'the `type` of a user the user service returned at all. Every genuine authorisation site ' +
+      'reads org.egov.common.contract.request.User from RequestInfo.userInfo, a DIFFERENT Java ' +
+      'class from the org.egov.pgr.web.models.User the shim answers into: ' +
+      'PGRService.hasAnyRole:438-442 behind isAuthorizedForConfidential:531 (confidential-field ' +
+      'masking), Principals.isPureCitizen:55, RoleCodes.normalize:29 (MDMSUtils:809, ' +
+      'AnalyticsCapabilityService:43, AccessPolicyRegistry:493, PolicyDrivenScopeResolver:171 from ' +
+      'requestInfo.getUserInfo() at :86), EmployeeContextService:154, PolicyInputBuilder:27. ' +
+      'RequestInfo.userInfo is filled by the GATEWAY from the 2.x token, and the gateway validates ' +
+      'sessions through its own upstream, NOT through EGOV_USER_HOST - so a shim response is ' +
+      'structurally unable to reach a privilege decision. Worst observed outcome of the old ' +
+      'invented roles: a domain event naming the wrong assignee role. ' +
+      'THE MIGRATION REQUIREMENT IS UNCHANGED AND IS THE POINT OF THIS ENTRY: v3 carries neither ' +
+      'roles nor user type, so a real cutover must source both from Keycloak realm roles - which ' +
+      'needs the Keycloak admin API, its own credentials, and a 2.x-role -> realm-role mapping ' +
+      'nobody has written.',
   },
   {
     field: 'User.id',

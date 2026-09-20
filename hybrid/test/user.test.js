@@ -8,6 +8,16 @@ const assert = require('node:assert');
 // Keep the gap log out of the repo copy while unit tests run.
 process.env.GAP_LOG = process.env.GAP_LOG || '/tmp/user-test-gaps.jsonl';
 const user = require('../src/translators/user');
+const fs = require('node:fs');
+
+// Reads only the lines a single call appended, so one test cannot see another's.
+function readGapLog(fn) {
+  const file = process.env.GAP_LOG;
+  const before = fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split('\n').length : 1;
+  fn();
+  const lines = fs.readFileSync(file, 'utf8').split('\n').slice(before - 1).filter(Boolean);
+  return lines.map((l) => JSON.parse(l));
+}
 
 // ---------------------------------------------------------------------------
 // The task brief's own two contract tests, verbatim.
@@ -127,11 +137,53 @@ test('a live v3 individual becomes a CCRS User with all seven fields CCRS needs'
   assert.strictEqual(u.emailId, 'zz@example.com');
   assert.strictEqual(u.tenantId, 'pg');
   assert.strictEqual(u.active, true);
-  // faked, because v3 reports neither
-  assert.strictEqual(u.type, 'CITIZEN');
-  assert.deepStrictEqual(u.roles, [{ code: 'CITIZEN', name: 'Citizen', tenantId: 'pg' }]);
+  // NOT invented: v3 reports neither, so the search path reports neither
+  assert.strictEqual(u.type, null);
+  assert.deepStrictEqual(u.roles, []);
   // dropped, because v3 has no numeric key
   assert.strictEqual(u.id, null);
+});
+
+// The search path used to stamp roles=[{CITIZEN}] / type="CITIZEN" on every
+// individual it returned, which meant getFirstRoleNameByUuid(<employee uuid>)
+// answered "Citizen". v3 reports neither field, so the shim reports neither.
+test('the search path invents NO roles and NO type, even for an unknown person', () => {
+  const employeeish = Object.assign({}, LIVE_INDIVIDUAL, {
+    id: 'emp-uuid', givenName: 'Gro', familyName: 'Officer', mobileNumber: '7000070000',
+  });
+  const v2 = user.toV2({ status: 200, json: { totalCount: 1, individuals: [employeeish] } },
+                       searchReq({ uuid: ['emp-uuid'], userType: 'CITIZEN' }));
+  const u = v2.user[0];
+  assert.deepStrictEqual(u.roles, [], 'an employee must not come back stamped CITIZEN');
+  assert.strictEqual(u.type, null, 'no user type may be invented on the search path');
+  // CCRS's only consumer is null-tolerant: getFirstRoleNameByUuid returns null
+  // for an empty roles list, and getAssigneeName then falls back to "NA".
+  assert.ok(Array.isArray(u.roles) && u.roles.length === 0);
+});
+
+test('the search path still gap-logs WHY roles and type are empty', () => {
+  const log = readGapLog(() => {
+    user.toV2({ status: 200, json: { individuals: [LIVE_INDIVIDUAL] } }, searchReq({ uuid: ['x'] }));
+  });
+  const roles = log.filter((e) => e.field === 'user.roles[]');
+  const type = log.filter((e) => e.field === 'user.type');
+  assert.strictEqual(roles.length, 1);
+  assert.strictEqual(type.length, 1);
+  assert.strictEqual(roles[0].action, 'dropped');
+  assert.strictEqual(type[0].action, 'dropped');
+  // the finding: v3 has no such fields, and the real values are Keycloak's
+  assert.match(roles[0].detail, /Keycloak realm roles/);
+  assert.match(type[0].detail, /Keycloak realm roles/);
+  // and the blast radius is stated honestly, not as a privilege escalation
+  assert.match(roles[0].detail, /NOT A PRIVILEGE PATH/);
+  assert.match(roles[0].detail, /getAssigneeName/);
+});
+
+test('the create path still ECHOES the caller\'s roles - that is not an invention', () => {
+  const created = Object.assign({}, LIVE_INDIVIDUAL, { id: 'new-uuid' });
+  const v2 = user.toV2({ status: 201, json: created }, createReq());
+  assert.deepStrictEqual(v2.user[0].roles, [{ code: 'CITIZEN', name: 'Citizen', tenantId: 'pg' }]);
+  assert.strictEqual(v2.user[0].type, 'CITIZEN');
 });
 
 test('createdDate is emitted in the exact format UserUtils.parseResponse demands', () => {
