@@ -24,6 +24,16 @@ router.register('/egov-idgen', require('./translators/idgen'));
 //     {host}/boundary-service/boundary/_search?limit=&offset=&tenantId=&codes=
 //     with a BARE RequestInfo body and the criteria in the query string.
 router.register('/boundary-service', require('./translators/boundary'));
+//   /egov-workflow-v2 -> CCRS POSTs THREE distinct paths under this one prefix
+//     {host}/egov-workflow-v2/egov-wf/process/_transition        (transition)
+//     {host}/egov-workflow-v2/egov-wf/businessservice/_search    (definition)
+//     {host}/egov-workflow-v2/egov-wf/process/_search            (3 query shapes:
+//        ?businessIds=<csv> | ?businessIds=<one>&history=true |
+//        ?businessService=&assignee=)
+//   The translator dispatches on the sub-path and throws on a fourth one.
+//   Note EGOV_WORKFLOW_HOST points at egov-workflow-proxy (a pass-through
+//   nginx), not at egov-workflow-v2 directly - it adds no behaviour.
+router.register('/egov-workflow-v2', require('./translators/workflow'));
 // -----------------------------------------------------------------------
 
 function send(res, status, obj) {

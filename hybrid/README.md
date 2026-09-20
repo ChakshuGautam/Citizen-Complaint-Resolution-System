@@ -30,6 +30,7 @@ cd /opt/hybrid-shim && docker compose -p hybrid up -d --build
 |---|---|---|---|
 | `egov-idgen` | `/egov-idgen` | `idgen` (`/idgen/v3/*`) | **live** — pgr-services only |
 | `boundary-service` | `/boundary-service` | `boundary` (`/boundary/v3/*`) | **live** — pgr-services only |
+| `egov-workflow-v2` | `/egov-workflow-v2` | `workflow` (`/workflow/v3/*`) | **live** — pgr-services only; lifecycle passes, see the divergence below |
 
 ### idgen (Task 3)
 
@@ -216,15 +217,138 @@ docker logs digit-pgr-services-1 --since 15m 2>&1 \
 Three consecutive runs: 7/7 PASS, `EQUIVALENT: 7 steps, 731 compared facts`,
 with `compare.sh`'s ignore list **unchanged**.
 
+### workflow (Task 5)
+
+**`EGOV_WORKFLOW_HOST` serves THREE 2.x paths, and one of them has three query
+shapes.** The inventory was taken from the Java *and* from the
+`egov-workflow-proxy` access log during a green lifecycle run — which is how
+`history=true`, named in no call site the plan lists, turned up:
+
+| 2.x path + query | CCRS caller | v3 |
+|---|---|---|
+| `POST …/egov-wf/process/_transition` | `WorkflowService.callWorkFlow:244` | `POST /workflow/v3/transition` |
+| `POST …/egov-wf/businessservice/_search?businessServices=PGR` | `WorkflowService:95`, `MigrationUtils:147` | `GET /workflow/v3/process/definition?processCode=` |
+| `POST …/egov-wf/process/_search?businessIds=<csv>` | `WorkflowService.enrichWorkflow:131` | `GET /workflow/v3/transition?entityId=` |
+| `POST …/egov-wf/process/_search?businessIds=<one>&history=true` | `NotificationService:662`, `EscalationService:277` | `…&history=true` |
+| `POST …/egov-wf/process/_search?businessService=&assignee=` | `WorkflowService.getServiceRequestIdsByAssignee:264` | `…&assignee=` |
+
+`src/translators/workflow.js` dispatches on the sub-path and **throws** on any
+fourth `/egov-workflow-v2/*` path (502 `SHIM_ERROR`). Field-by-field notes, all
+probed live, are in the translator's header comment.
+
+`EGOV_WORKFLOW_HOST` appears **once** in
+`/opt/digit/docker-compose.egov-digit.yaml` (line 1809). Original value:
+`http://egov-workflow-proxy:8109/` — a pure pass-through nginx
+(`/opt/digit/nginx/workflow-proxy.conf`) in front of `egov-workflow-v2:8109`,
+so it adds no behaviour of its own.
+
+```bash
+python3 /opt/hybrid-shim/flip_workflow.py shim   # -> http://hybrid-shim:9100/
+python3 /opt/hybrid-shim/flip_workflow.py orig   # -> http://egov-workflow-proxy:8109/
+```
+then restart pgr-services with the **full five-file** `-f` list shown under
+idgen. A pristine copy of the file as it was before Task 5 is kept at
+`/opt/hybrid-shim/docker-compose.egov-digit.yaml.task5-orig`.
+
+> **Verify the restart actually happened.** `docker compose up -d pgr-services`
+> can leave the container running. Compare `docker inspect
+> digit-pgr-services-1 --format '{{.State.StartedAt}}'` before and after, and
+> confirm `EGOV_WORKFLOW_HOST` inside the *running* container.
+
+#### Hostname check
+
+`d3-boundary-service` claims the alias `boundary-service`, so Task 4 had to
+check for a collision. The workflow equivalent has none: `d3-workflow-service`
+claims `[d3-workflow-service, workflow-service]` on `digit3_default` only,
+while `digit-egov-workflow-v2-1` claims `[digit-egov-workflow-v2-1,
+egov-workflow-v2]` on `digit_egov-network`.
+
+#### Registering the PGR workflow in v3 first
+
+Nothing migrates the 2.x `BusinessService`. `v3-config/pgr-businessservice-2x.json`
+is the live export (tenant `pg`), and `v3-config/pgr-process-definition.yaml` is
+it transcribed into the v3 shape — 9 states, 17 actions, roles and SLAs
+verbatim.
+
+```bash
+bash /opt/hybrid-shim/register-pgr-workflow.sh   # idempotent; V3=, TENANT= overridable
+node /opt/hybrid-shim/record-workflow-gaps.js    # idempotent; once per fresh store
+curl -s -H 'X-Tenant-ID: pg' -H 'X-User-ID: me' \
+  http://localhost:8000/workflow/v3/process/definition | head -c 400
+```
+
+`digit create-workflow --file` is **not** used: the CLI is unconfigured on this
+box (`digit config show` prints an empty server URL and token) and
+`digit config set` authenticates against Keycloak, while this v3 Kong has zero
+plugins. `register-pgr-workflow.sh` posts the CLI's payload with curl, exactly
+as Task 3 registered the idgen template.
+
+#### Roles: v3 reads them **only** from a Bearer JWT
+
+`ActionInput` in `digit-specs/v3.0.0/workflow.yaml` does not declare `roles` —
+but the live service accepts, stores, returns **and enforces** it (403
+`caller role does not permit the requested action`). The only channel it reads
+roles from is `Authorization: Bearer <jwt>` with `realm_access.roles`; the
+`X-Roles` header named in the service's own `Headers` constant is ignored by
+this build (verified: `X-Roles` → 403, Bearer → 200), and the signature is not
+checked, so `{"alg":"none"}` is honoured. The shim therefore forges an unsigned
+token carrying exactly the roles the inbound 2.x `RequestInfo` already asserts.
+Registering the actions *without* roles was rejected: a role-less action is open
+to everyone, which would delete CCRS's authorisation model silently.
+
+#### Result: 7/7 PASS, and 259 facts that differ
+
+Three consecutive runs, `docker restart` between: **7/7 PASS**, complaint
+lifecycle `PENDINGFORASSIGNMENT → PENDINGATLME → RESOLVED`, run views
+byte-identical to each other. `compare.sh` against the 2.x baseline reports
+**55 changed, 193 missing, 11 new** of 731 facts, and every one of them sits in
+`service.processInstance` on the three transition steps. **The two search steps
+are byte-identical to the 2.x baseline.** The ignore list was **not** touched —
+this is v3 behaving differently, so it lives in `gaps.jsonl`.
+
+```bash
+OUT=/opt/hybrid-shim/runs/workflow-$(date +%H%M).json bash /opt/hybrid-shim/baseline/lifecycle.sh
+bash /opt/hybrid-shim/baseline/compare.sh \
+  /opt/hybrid-shim/baseline/baseline-20260920-0238.json /opt/hybrid-shim/runs/workflow-XXXX.json
+# proof the v3 store holds the complaint's whole history:
+curl -s -H 'X-Tenant-ID: pg' -H 'X-User-ID: me' \
+  'http://localhost:8000/workflow/v3/transition?processCode=PGR&entityId=<SRID>&history=true'
+```
+
+#### What DIGIT 3.0 cannot do at all (22 gap entries, `record-workflow-gaps.js`)
+
+Verified live, not inferred from the spec:
+
+- **Self-loop actions are dead.** Any action with `nextState == currentState`
+  is stored and then refused at runtime with 409
+  `invalid state transition: no transition`. That is **COMMENT** (5 states) and
+  **ESCALATE** (PENDINGATLME) — so citizen commenting and auto-escalation are
+  both unavailable.
+- **`isTerminateState` survives nowhere.** `TERMINAL_SUCCESS`/`TERMINAL_FAILURE`
+  are accepted and silently rewritten to `INTERMEDIATE`.
+- **`additionalDetails` is accepted and discarded** on process definitions and
+  states, so there is no escape hatch for 2.x-only config either.
+- **Multi-id search is impossible** — comma form returns `[]`, repeated
+  `?entityId=` honours only the first. Any employee search returning more than
+  one complaint fails `WORKFLOW_NOT_FOUND` (loudly, by design).
+- **`processCode` is mandatory when filtering by `entityId`**, and 2.x's
+  businessIds search carries none — the shim invents `PGR` and logs it.
+- **Escalation up the HRMS `reportingTo` chain has no v3 model**: `assignees`
+  are opaque strings, `EscalationConfig` can only name a fixed action, and no v3
+  spec carries a reporting hierarchy.
+- `PENDINGATSUPERVISOR` and `SLA_ESCALATE`, which the plan expected, **do not
+  exist in this CCRS** — removed on purpose (`docs/migration/pgr-escalation-self-loop.md`);
+  both are recorded so the inventory accounts for them.
+
 ---
 
 ## Tests
 
 ```bash
-cd /opt/hybrid-shim && node --test test/      # 47/47, no npm dependencies
+cd /opt/hybrid-shim && node --test test/      # 67/67, no npm dependencies
 ```
 
-`test/idgen.test.js` and `test/boundary.test.js` redirect `GAP_LOG` to a temp
+`test/idgen.test.js`, `test/boundary.test.js` and `test/workflow.test.js` redirect `GAP_LOG` to a temp
 dir, so running the suite never writes to the real `gaps.jsonl`.
 
 ## Gap log
