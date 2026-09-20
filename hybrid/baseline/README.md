@@ -6,13 +6,25 @@ the unmodified CCRS (DIGIT 2.12) stack, over the public 2.x API surface only
 state it creates is one complaint per run.
 
 Exit code is 0 only when every step passes. Each HTTP call appends one JSON
-record to `$OUT`, so a later run with a dependency re-pointed at the hybrid shim
-can be diffed against this baseline.
+record to `$OUT`, and a normalized comparison view to `$OUT.view`, so a later
+run with a dependency re-pointed at the hybrid shim can be compared against this
+baseline — see **Diffing two runs** below.
 
 ```bash
+# record a run
 OUT=/opt/hybrid-shim/baseline/baseline-$(date +%Y%m%d-%H%M).json \
   bash /opt/hybrid-shim/baseline/lifecycle.sh
+
+# compare a later run against the baseline (exit 0 == no regression)
+bash /opt/hybrid-shim/baseline/compare.sh \
+  /opt/hybrid-shim/baseline/baseline-20260920-0238.json /tmp/run.json
 ```
+
+| file | role |
+|---|---|
+| `lifecycle.sh` | drives the lifecycle, writes `$OUT` and `$OUT.view` |
+| `compare.sh` | normalizes and compares two runs; owns the volatile-field list |
+| `baseline-20260920-0238.json` (+ `.view`) | the reference run everything is measured against |
 
 ## Values that actually work (discovered, verified 2026-09-20)
 
@@ -33,13 +45,15 @@ Tokens come from `POST $KONG/user/oauth/token` with
 `Authorization: Basic ZWdvdi11c2VyLWNsaWVudDo=` (`egov-user-client:`),
 `userType=CITIZEN` or `userType=EMPLOYEE`.
 
-### Port correction
+### Gateway port
 
-The task brief says the 2.x Kong is on host port **11234**. It is not —
-`11234` is `egov-enc-service` (`127.0.0.1:11234->1234/tcp`), which answers
-`/user/oauth/token` with a Tomcat **404**. The CCRS Kong is `kong-gateway`
-on **`127.0.0.1:18000`**. (This matches `url` in
-`/opt/digit/postman/complaints-demo.postman_collection.json`.)
+The CCRS 2.x Kong is `kong-gateway` on **`127.0.0.1:18000`**. This matches
+`url` in `/opt/digit/postman/complaints-demo.postman_collection.json`.
+
+Port **11234**, which the plan originally specified, is `egov-enc-service`
+(`127.0.0.1:11234->1234/tcp`); it answers `/user/oauth/token` with a Tomcat
+**404** HTML page. The plan and the task briefs have since been corrected to
+18000, so this note is only here to save the next person the same lookup.
 
 ### Citizen auth caveat
 
@@ -111,7 +125,72 @@ One JSON object per line in `$OUT`:
 Steps, in order: `citizen_auth`, `create`, `search_after_create`,
 `employee_auth`, `assign`, `resolve`, `search_final` — 7 records.
 
-Two deliberate deviations from the brief:
+`$OUT` keeps **full fidelity** — real ids, real timestamps. That is what you
+want when investigating a gap. It is deliberately *not* the thing you diff.
+
+## Diffing two runs
+
+Raw `$OUT` files cannot be diffed directly: every run mints a new
+`serviceRequestId` and fresh `createdTime`/`lastModifiedTime`, so a literal
+diff is ~100% noise. Two mechanisms fix that, both driven by one ignore list
+that lives in `compare.sh`:
+
+**1. `$OUT.view` — plain-diffable.** `lifecycle.sh` writes it automatically
+next to `$OUT`. It is the normalized comparison view: one fact per line,
+`step<TAB>path<TAB>value`, sorted, with volatile values replaced by
+`"<volatile>"`. `diff baseline.json.view run.json.view` on two genuinely
+different good runs is **byte-identical** (verified).
+
+**2. `compare.sh` — semantic report.**
+
+```bash
+bash compare.sh baseline-20260920-0238.json /tmp/run.json   # exit 0 == equivalent
+bash compare.sh --view /tmp/run.json                        # print the view
+```
+
+Exit 0 and `EQUIVALENT: 7 steps, 731 compared facts`, or exit 1 and a report
+grouped into: steps that did not run (collapsed to one line each — a run that
+aborts early otherwise buries its own cause under the whole baseline tail),
+changed values, fields missing from the run, and fields new in the run. Long
+lists are capped at `COMPARE_MAX_LINES` (default 25). Exit 2 is a usage/IO
+error, so a broken invocation is never mistaken for "equivalent".
+
+### What is compared
+
+Everything: **731 facts** per run. Per step, the HTTP code, the step's position
+in the sequence, and every leaf value in the response body by full path —
+including `null`s, empty objects and empty lists, so a shim that drops or
+renames a field shows up as `MISSING FROM RUN` / `NEW IN RUN`.
+
+### What is ignored, and why
+
+Volatility is decided **by path, not by key name**. That matters: a blanket
+"ignore anything called `id`" would also blind the comparison to
+`citizen_auth.UserRequest.id`, which is what pins *which* citizen authenticated.
+
+| ignored path pattern | why |
+|---|---|
+| `*.expires_in` | token lifetime, counts down in real time |
+| `*.auditDetails.createdTime` | epoch millis |
+| `*.auditDetails.lastModifiedTime` | epoch millis |
+| `*.serviceRequestId` | `PG-PGR-<date>-<counter>`, new per complaint |
+| `*.businessId` | same value as `serviceRequestId` |
+| `*.service.id` | server-generated uuid |
+| `*.service.address.id` | server-generated uuid |
+| `*.processInstance.id` | server-generated uuid |
+| `*.businesssServiceSla` | SLA remaining, counts down (upstream spells it with three s's) |
+| `*.responseInfo.ts`, `*.ResponseInfo.ts` | intermittently null or epoch millis |
+
+This list was **derived, not guessed**: five real runs were diffed against each
+other and every varying leaf path is covered — 41 of 717. `responseInfo.ts` was
+added after it flipped between two otherwise identical runs even though five
+consecutive runs had agreed on it; anything that is "sometimes null, sometimes a
+timestamp" is noise by definition.
+
+If a later task sees a difference it believes is noise, the fix is to add the
+path here **with a reason** — not to loosen the comparison globally.
+
+Three deliberate deviations from the brief:
 
 - The brief's prose describes the record as `{step, status, http_code, body}`
   but the `record()` helper it supplies verbatim writes `{step, http_code, body}`.
@@ -119,12 +198,30 @@ Two deliberate deviations from the brief:
 - `access_token` / `refresh_token` in the two auth bodies are replaced with
   `"<redacted>"` before recording, so the artifact holds no live credential and
   auth records diff cleanly across runs.
+- `lifecycle.sh` also writes `$OUT.view` and ships `compare.sh` alongside, which
+  the brief did not ask for. Without them the promise that "later tasks re-run
+  this script and diff against the baseline" cannot actually be kept.
 
 ## Baseline run
 
-`/opt/hybrid-shim/baseline/baseline-20260920-0238.json` — 7/7 steps HTTP 200,
-exit 0, complaint `PG-PGR-2026-09-20-005172`. Re-run immediately afterwards to
-confirm it is repeatable, not a one-off: pass again, exit 0.
+`/opt/hybrid-shim/baseline/baseline-20260920-0238.json` (+ `.view`) — 7/7 steps
+HTTP 200, exit 0, complaint `PG-PGR-2026-09-20-005172`.
+
+Re-run nine more times since, each a fresh complaint: all exit 0, and
+`compare.sh` reports `EQUIVALENT` against the baseline for every one. `diff` of
+the `.view` files is byte-identical across genuinely different runs.
+
+### compare.sh actually detects regressions
+
+Each case below is a copy of a good run, altered by hand, except the last which
+is a real broken run:
+
+| case | result |
+|---|---|
+| `search_final` `applicationStatus` `RESOLVED`→`PENDINGATLME` | exit 1, `CHANGED VALUES (1)` naming that exact path |
+| `assign` `http_code` `200`→`500` | exit 1, `CHANGED VALUES (1)`: `@http_code` |
+| `create` `service.source` deleted (what a lossy shim does) | exit 1, `MISSING FROM RUN (1)`: `service.source = "web"` |
+| real run with `SERVICE_CODE=NoSuchComplaintType` | exit 1, `STEPS THAT DID NOT RUN (5)` + `create @http_code 200→400` |
 
 ### The script actually fails when it should
 
