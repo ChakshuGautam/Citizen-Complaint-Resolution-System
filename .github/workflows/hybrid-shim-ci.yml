@@ -1,0 +1,72 @@
+name: Hybrid Shim CI
+
+# The CCRS x DIGIT 3.0 translation shim (hybrid/) has no npm dependencies and
+# no services to stand up, so its unit suite runs anywhere Node does.
+#
+# Note the test invocation: `node --test test/` (with the trailing slash) runs
+# the suite on Node 20 but fails on Node 22 with "Cannot find module .../test".
+# The glob form works on both, and the matrix below is here to keep it that way.
+
+on:
+  push:
+    branches: [master, main, develop]
+    paths:
+      - 'hybrid/**'
+      - '.github/workflows/hybrid-shim-ci.yml'
+  pull_request:
+    branches: [master, main, develop]
+    paths:
+      - 'hybrid/**'
+      - '.github/workflows/hybrid-shim-ci.yml'
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: hybrid
+
+jobs:
+  unit:
+    name: Shim unit tests (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '22']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: No dependencies expected
+        run: |
+          if [ -f package.json ]; then
+            echo "hybrid/package.json appeared; the shim is meant to be stdlib-only." >&2
+            exit 1
+          fi
+
+      - name: Unit tests
+        run: node --test "test/*.test.js"
+
+  instruments:
+    name: Measuring instruments intact
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # lifecycle.sh and compare.sh define what "the lifecycle still passes"
+      # means. Every result on this branch is stated relative to them, so a
+      # silent edit would invalidate the findings rather than break a test.
+      - name: Baseline scripts parse
+        run: bash -n baseline/lifecycle.sh baseline/compare.sh baseline/inbox-check.sh
+
+      - name: Translators never import anything outside the stdlib
+        run: |
+          if grep -rnP "require\(['\"](?!node:|\.)" src/ --include='*.js'; then
+            echo "Non-stdlib, non-relative require found in hybrid/src." >&2
+            exit 1
+          fi
+          echo "stdlib-only: ok"

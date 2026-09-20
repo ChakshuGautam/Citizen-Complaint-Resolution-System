@@ -488,7 +488,7 @@ stays comparable to `baseline-20260920-0238.json`.
 ## Tests
 
 ```bash
-cd /opt/hybrid-shim && node --test test/      # 91/91, no npm dependencies
+cd /opt/hybrid-shim && node --test test/      # 125/125, no npm dependencies
 ```
 
 `test/idgen.test.js`, `test/boundary.test.js`, `test/workflow.test.js` and `test/user.test.js` redirect `GAP_LOG` to a temp
