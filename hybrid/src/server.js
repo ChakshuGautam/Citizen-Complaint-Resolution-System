@@ -15,8 +15,9 @@ const MAX_BODY_BYTES = Number(process.env.MAX_BODY_BYTES || 10 * 1024 * 1024);
 // --- Translator registration -------------------------------------------
 // Tasks 3-6 add one line each. Registered so far:
 //   /egov-idgen -> CCRS POSTs {host}egov-idgen/id/_generate (egov.idgen.path).
-// Prefixes are registered WITHOUT a trailing slash: router.normalize() folds
-// the two spellings together, so a trailing slash would silently collide.
+// Register prefixes WITHOUT a trailing slash: router.normalize() folds the two
+// spellings together, and a duplicate now throws at boot rather than silently
+// replacing an existing translator.
 // Any path with no translator still answers 502 SHIM_UNMAPPED.
 router.register('/egov-idgen', require('./translators/idgen'));
 // -----------------------------------------------------------------------
@@ -93,12 +94,13 @@ async function handle(req, res) {
     }
   }
 
-  const translator = router.resolve(pathname);
-  if (!translator) {
+  const match = router.resolveEntry(pathname);
+  if (!match) {
     gaplog.record({ dep: 'router', field: pathname, action: 'unmapped' });
     send(res, 502, { Errors: [{ code: 'SHIM_UNMAPPED', message: pathname }] });
     return;
   }
+  const translator = match.translator;
 
   const req2x = makeReq2x(body, req, pathname);
   try {
@@ -116,7 +118,35 @@ async function handle(req, res) {
     send(res, v3res.status >= 400 ? v3res.status : 200, out);
   } catch (err) {
     process.stderr.write(`shim: ${pathname}: ${err.stack || err.message}\n`);
+    // A translator that throws on a real 2.x payload IS a gap - it is the
+    // loudest kind there is. stderr scrolls away; the gap log is the
+    // deliverable, so the failure has to land there too.
+    recordFailure(match, pathname, err);
     send(res, 502, { Errors: [{ code: 'SHIM_ERROR', message: `${pathname}: ${err.message}` }] });
+  }
+}
+
+// Name the dependency that threw, so the gap log says 'egov-idgen' rather than
+// 'server'. A translator may declare its own `dep`; otherwise the matched route
+// prefix is the best identifier we have.
+function recordFailure(match, pathname, err) {
+  let dep = 'server';
+  try {
+    if (match) {
+      dep =
+        (match.translator && match.translator.dep) ||
+        String(match.prefix || '').replace(/^\//, '') ||
+        'server';
+    }
+    gaplog.record({
+      dep,
+      field: pathname,
+      action: 'unmapped',
+      detail: `translator threw handling ${pathname}: ${err && err.message ? err.message : String(err)}`,
+    });
+  } catch (logErr) {
+    // Never let gap logging stop the 502 from going out.
+    process.stderr.write(`shim: gaplog failed for ${pathname}: ${logErr.message}\n`);
   }
 }
 

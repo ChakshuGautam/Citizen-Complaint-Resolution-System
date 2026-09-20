@@ -2,10 +2,13 @@
 // seed-gaps.js
 //
 // Writes the gaps that were already known before the shim ran a single
-// request - discovered while building the 2.x baseline in Task 1. Idempotent:
-// re-running it does NOT de-duplicate, so run it once per fresh gaps.jsonl.
+// request - discovered while building the 2.x baseline in Task 1.
+//
+// Safe to re-run: an entry whose (dep, field, action) triple is already in the
+// log is skipped, so this never duplicates seeds into a live gaps.jsonl.
 //
 //   GAP_LOG=/opt/hybrid-shim/gaps/gaps.jsonl node seed-gaps.js
+const fs = require('node:fs');
 const gaplog = require('./src/gaplog');
 
 const seeds = [
@@ -31,6 +34,52 @@ const seeds = [
   },
 ];
 
-for (const s of seeds) {
-  process.stdout.write(JSON.stringify(gaplog.record(s)) + '\n');
+// The identity of a seed is (dep, field, action). The timestamp and the detail
+// wording are deliberately NOT part of it, so re-running after an edit to the
+// detail text still does not duplicate the entry.
+function key(e) {
+  return JSON.stringify([e.dep, e.field, e.action]);
 }
+
+function existingKeys(file) {
+  const seen = new Set();
+  let raw;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    if (err.code === 'ENOENT') return seen; // fresh log, nothing to skip
+    throw err;
+  }
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      seen.add(key(JSON.parse(line)));
+    } catch {
+      // A malformed line cannot be matched against; ignore it rather than
+      // refusing to seed. The gap log is append-only and hand-inspectable.
+    }
+  }
+  return seen;
+}
+
+function main() {
+  const file = gaplog.logPath();
+  const seen = existingKeys(file);
+  let wrote = 0;
+  let skipped = 0;
+
+  for (const s of seeds) {
+    if (seen.has(key(s))) {
+      skipped += 1;
+      process.stdout.write(`skip (already present): ${s.dep} ${s.field} ${s.action}\n`);
+      continue;
+    }
+    process.stdout.write(JSON.stringify(gaplog.record(s)) + '\n');
+    seen.add(key(s));
+    wrote += 1;
+  }
+
+  process.stdout.write(`seed-gaps: ${wrote} written, ${skipped} skipped -> ${file}\n`);
+}
+
+main();
