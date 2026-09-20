@@ -240,3 +240,68 @@ One complaint per run on tenant `pg`, status `RESOLVED` (`RATE` is not driven,
 so it stops short of `CLOSEDAFTERRESOLUTION`). Nothing else is written.
 </content>
 </invoke>
+
+## `inbox-check.sh` — the multi-complaint employee inbox
+
+`lifecycle.sh` is deliberately left alone (it has to stay comparable against
+`baseline-20260920-0238.json`), and there is one CCRS behaviour it structurally
+cannot see.
+
+`WorkflowService.enrichWorkflow` (`service/WorkflowService.java:131-145`) joins
+**every** complaint in a search result to its workflow in **one** call:
+
+```
+POST {wf}/egov-workflow-v2/egov-wf/process/_search?businessIds=<csv>
+...
+if (processInstances.size() != serviceRequestIds.size())
+    throw new CustomException("WORKFLOW_NOT_FOUND", "The workflow object is not found");
+```
+
+Both of `lifecycle.sh`'s searches are scoped to a single `serviceRequestId`, so
+that csv always has exactly one element and the check always passes — no matter
+what is serving the workflow. `inbox-check.sh` is the missing instrument:
+
+1. citizen auth
+2. create complaint **A**
+3. create complaint **B**
+4. employee auth
+5. `POST /pgr-services/v2/request/_search?tenantId=pg&ids=<A>,<B>` — an
+   inbox-shaped employee query returning **two** complaints
+6. assert **both** come back
+
+```bash
+OUT=/opt/hybrid-shim/runs/inbox-2x.json bash inbox-check.sh   # exit 0 only if both returned
+```
+
+Measured 2026-09-20, same box, same minute, only `EGOV_WORKFLOW_HOST` changed:
+
+| workflow host | result |
+|---|---|
+| `http://egov-workflow-proxy:8109/` (2.x) | HTTP 200, 2 wrappers, **PASS** |
+| `http://hybrid-shim:9100/` (DIGIT 3.0) | HTTP 400 `WORKFLOW_NOT_FOUND`, **FAIL** |
+
+v3's `GET /workflow/v3/transition` serves exactly one `entityId`: the comma
+form yields `totalCount 0` and the repeated-parameter form honours only the
+first value. So every employee inbox holding two or more complaints is dead on
+v3, while the lifecycle stays green.
+
+### Why the query is scoped with `ids=`, not `applicationStatus=`
+
+The first version searched `?tenantId=pg&applicationStatus=PENDINGFORASSIGNMENT`
+and failed with the **same** `WORKFLOW_NOT_FOUND` on **both** engines — which
+would have made it a broken instrument rather than a finding. The reason is
+worth recording on its own: this tenant now holds complaints whose process
+instances live in the *other* engine's store (everything created while
+`EGOV_WORKFLOW_HOST` pointed at the shim is in DIGIT 3.0; everything older is in
+`egov-workflow-v2`). **Workflow state was never migrated between the two**, so
+any tenant-wide query spans both stores and neither can answer it. Flipping
+`EGOV_WORKFLOW_HOST` is not reversible for complaints already in flight.
+
+Scoping to the two complaints the script itself just created keeps both rows in
+whichever store is currently wired in, leaving the multi-id join as the only
+variable.
+
+### Test data left behind
+
+Two extra complaints per run, both parked in `PENDINGFORASSIGNMENT`, plus the
+usual idgen sequence consumption. Same footprint as `lifecycle.sh`, doubled.

@@ -34,6 +34,18 @@ router.register('/boundary-service', require('./translators/boundary'));
 //   Note EGOV_WORKFLOW_HOST points at egov-workflow-proxy (a pass-through
 //   nginx), not at egov-workflow-v2 directly - it adds no behaviour.
 router.register('/egov-workflow-v2', require('./translators/workflow'));
+//   /user -> CCRS POSTs THREE 2.x paths under this one prefix, and ONLY these
+//     three (counted from service/UserService.java AND from the
+//     egov-user-proxy access log grouped by source container):
+//     {host}/user/_search                     search by uuid[] | userName | mobileNumber
+//     {host}/user/users/_createnovalidate     create a citizen
+//     {host}/user/users/_updatenovalidate     rename / update contact details
+//   The translator dispatches on the sub-path and THROWS on a fourth one -
+//   notably on /user/_details and /user/oauth/token, which appear in that same
+//   access log but are issued by kong-gateway through its OWN upstream, not
+//   through pgr-services' EGOV_USER_HOST. Authentication does not move when
+//   this variable is flipped, and could not be served if it did.
+router.register('/user', require('./translators/user'));
 // -----------------------------------------------------------------------
 
 function send(res, status, obj) {

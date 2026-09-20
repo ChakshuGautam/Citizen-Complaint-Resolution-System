@@ -31,6 +31,7 @@ cd /opt/hybrid-shim && docker compose -p hybrid up -d --build
 | `egov-idgen` | `/egov-idgen` | `idgen` (`/idgen/v3/*`) | **live** — pgr-services only |
 | `boundary-service` | `/boundary-service` | `boundary` (`/boundary/v3/*`) | **live** — pgr-services only |
 | `egov-workflow-v2` | `/egov-workflow-v2` | `workflow` (`/workflow/v3/*`) | **live** — pgr-services only; lifecycle passes, see the divergence below |
+| `egov-user` | `/user` | `individual` (`/individual/v3/*`) | **REVERTED** — translator written, tested and working, but CCRS cannot use it: see below |
 
 ### idgen (Task 3)
 
@@ -342,13 +343,155 @@ Verified live, not inferred from the spec:
 
 ---
 
+### user / individual (Task 6) — **reverted, and that is the finding**
+
+`EGOV_USER_HOST` is back on `http://egov-user-proxy:8107/`. The translator
+(`src/translators/user.js`, 24 tests) is complete and demonstrably works
+against the live v3 registry — it is CCRS's *identity* that cannot cross, not
+its user *lookups*.
+
+#### The three endpoints, counted two ways
+
+pgr-services builds its user URIs from `egov.user.host` +
+`{/user/_search, /user/users/_createnovalidate, /user/users/_updatenovalidate}`
+(`application.properties:73-78`), reached from six call sites in
+`service/UserService.java`. The `egov-user-proxy` access log, grouped by source
+container IP, agrees and adds the two that matter:
+
+| path | source | moves with `EGOV_USER_HOST`? |
+|---|---|---|
+| `POST /user/_search` | pgr-services (.38) — 477 | **yes** |
+| `POST /user/users/_createnovalidate` | pgr-services — 9 | **yes** |
+| `POST /user/users/_updatenovalidate` | pgr-services — 1 | **yes** (but unservable) |
+| `POST /user/_details?access_token=` | **kong-gateway (.35) — 2696** | **NO** |
+| `POST /user/oauth/token` | **kong-gateway — 115** | **NO** |
+| `POST /user/v1/_search` | egov-hrms (.36) — 129 | no |
+
+The gateway validates every session through its **own** upstream, not through
+this variable. So the flip moves user *lookups* and leaves *authentication*
+exactly where it was — which is precisely why it fails.
+
+#### The failure, in one call
+
+```
+lifecycle.sh -> PASS citizen_auth -> FAIL create 400
+  {"Errors":[{"code":"INVALID_ACCOUNTID",
+              "message":"No user exist for the given accountId"}]}
+```
+
+1. `POST {kong}/user/oauth/token` (2.x egov-user, untouched) mints a session
+   for `9999009999` with `uuid = f1a94c66-a4b5-46da-9492-07b7db54c69f` — a row
+   id in the **egov-user** schema.
+2. `EnrichmentService.enrichCreateRequest:64` copies it onto the complaint:
+   `service.accountId = requestInfo.userInfo.uuid`.
+3. `UserService.enrichUser:110` asks for it back:
+   `POST http://hybrid-shim:9100/user/_search` with `uuid:[f1a94c66-…]`
+   (confirmed in the pgr-services RestTemplate log).
+4. The shim translates it faithfully to
+   `GET /individual/v3/individuals?id=f1a94c66-…&size=1&page=1`.
+   v3 answers `{"totalCount":0,"individuals":[]}`.
+5. CCRS throws `INVALID_ACCOUNTID`.
+
+#### Why no shim can fix it
+
+| attempted mapping | what the live service does |
+|---|---|
+| create the individual **at** the 2.x uuid | `id` in the body is **silently ignored** — sent `aaaaaaaa-…`, got `629b9122-…` (201). Same for `individualId`. |
+| store the 2.x uuid in `individual.userId` | stored, but the `?userId=` **filter is ignored**: `?userId=<bogus>` returned *every* individual in the tenant, HTTP 200 |
+| store it in `additionalAttributes` | accepted, but not a search filter — write-only |
+
+There is no stateless mapping. A stateful one is a user-migration service.
+**The requirement is: migrate every `egov-user` row into the individual
+registry, and move CCRS's login to the identity provider v3 already expects —
+Keycloak** (`d3-keycloak` is running; `d3-individual` carries
+`KEYCLOAK_ENABLED=true`, `KEYCLOAK_ASSIGNABLE_ROLES=ASSIGNER,CITIZEN`).
+
+#### Everything else about the translator works
+
+Probed live through the shim on :9100 before the flip:
+
+* search by mobile → a full CCRS `User` envelope, `HTTP 200`
+* create → `HTTP 200`, individual minted, uuid returned
+* `_updatenovalidate` → `HTTP 502 SHIM_ERROR` (loud, by design)
+* `/user/_details`, `/user/oauth/token`, `/user/v1/_search` → `HTTP 502 SHIM_ERROR`
+
+And one thing v3's individual does **better** than its workflow: the repeated
+form `?id=a&id=b` really does OR the values (`?id=<known>&id=<unknown>` →
+`totalCount 1`), so `searchBulkUser` — the multi-complaint employee inbox that
+Task 5 found dead on the workflow service — *is* servable here. The comma form
+`?id=a,b` is not (400), so the translator uses the repeated form.
+
+#### A v3 stack can be healthy and unable to store a person
+
+Every create returned `500 ENCRYPTION_ERROR` until
+`register-individual-transit.sh` ran: `d3-individual` encrypts PII through
+Vault transit and **the transit engine was never mounted** on this box
+(`no handler for route "transit/encrypt/IndividualEncrypt"`). Searches answered
+`200` throughout. Nothing in the API surface says so until the first write.
+
+#### Switching CCRS over, and back
+
+```bash
+python3 /opt/hybrid-shim/flip_user.py shim      # -> http://hybrid-shim:9100/
+python3 /opt/hybrid-shim/flip_user.py orig      # -> http://egov-user-proxy:8107/
+cd /opt/digit && docker compose -p digit \
+  -f docker-compose.egov-digit.yaml -f docker-compose.fast-path.yml \
+  -f docker-compose.migrations.yml -f docker-compose.monitoring.yml \
+  -f docker-compose.matomo.yml up -d pgr-services
+docker inspect digit-pgr-services-1 --format '{{.State.StartedAt}}'   # CHECK IT
+```
+
+`EGOV_USER_HOST` occurs **six** times in the compose file (egov-workflow-v2,
+boundary-service, egov-hrms, the bootstrap job …). `flip_user.py` edits only
+the copy inside the `pgr-services:` block and asserts there is exactly one.
+Pristine pre-Task-6 file: `docker-compose.egov-digit.yaml.task6-orig`.
+
+#### 11 registration-time gap entries — `record-user-gaps.js`
+
+Identity mapping, the ignored-filter trap, the unmounted Vault transit engine,
+`gender` mandatory-but-documented-optional, the `^[A-Za-z ]+$` name regex, the
+mandatory `version` on update, the size-100 cap, roles/type/userName having no
+v3 representation at all, `User.id` having no uuid-registry counterpart, and
+`createdDate` being load-bearing for `UserUtils.parseResponse`.
+
+---
+
+### The employee inbox — `baseline/inbox-check.sh`
+
+A second instrument, added because `lifecycle.sh` cannot see the gap Task 5
+found: `WorkflowService.enrichWorkflow` joins every complaint in a search
+result to its workflow in one `?businessIds=<csv>` call and throws
+`WORKFLOW_NOT_FOUND` unless the counts match, but **both** lifecycle searches
+are scoped to a single `serviceRequestId`, so the csv is always one element
+long. `inbox-check.sh` creates **two** complaints, authenticates as the
+employee and searches `?tenantId=pg&ids=<A>,<B>`.
+
+```
+on 2.x  (EGOV_WORKFLOW_HOST=egov-workflow-proxy:8109)  HTTP 200, 2 wrappers, PASS
+on v3   (EGOV_WORKFLOW_HOST=hybrid-shim:9100)          HTTP 400, WORKFLOW_NOT_FOUND, FAIL
+```
+
+Same script, same box, same minute. `lifecycle.sh` was **not** modified, so it
+stays comparable to `baseline-20260920-0238.json`.
+
+> **Instrument caveat, recorded because it invalidated the first version:** a
+> tenant-wide query (`?applicationStatus=PENDINGFORASSIGNMENT`) fails with the
+> *same* `WORKFLOW_NOT_FOUND` on **both** engines, because the tenant now holds
+> complaints whose process instances live in the other engine's store —
+> workflow state was never migrated between 2.x and v3. Flipping
+> `EGOV_WORKFLOW_HOST` is not reversible for complaints already in flight.
+> Scoping to the two complaints the script just created is what makes the
+> multi-id gap the only variable.
+
+---
+
 ## Tests
 
 ```bash
-cd /opt/hybrid-shim && node --test test/      # 67/67, no npm dependencies
+cd /opt/hybrid-shim && node --test test/      # 91/91, no npm dependencies
 ```
 
-`test/idgen.test.js`, `test/boundary.test.js` and `test/workflow.test.js` redirect `GAP_LOG` to a temp
+`test/idgen.test.js`, `test/boundary.test.js`, `test/workflow.test.js` and `test/user.test.js` redirect `GAP_LOG` to a temp
 dir, so running the suite never writes to the real `gaps.jsonl`.
 
 ## Gap log
