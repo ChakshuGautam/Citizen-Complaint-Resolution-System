@@ -143,7 +143,7 @@ async function handle(req, res) {
   const req2x = makeReq2x(body, req, pathname);
   try {
     const v3req = translator.toV3(req2x);
-    const headers = Object.assign({}, context.toHeaders(req2x), v3req.headers || {});
+    const headers = Object.assign({}, context.toHeaders(req2x, pathname), v3req.headers || {});
     const v3res = await client.call({
       method: v3req.method,
       path: v3req.path,

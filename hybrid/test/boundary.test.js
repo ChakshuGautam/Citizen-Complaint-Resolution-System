@@ -420,3 +420,103 @@ test('a missing __shim is gap-logged as unmapped, not swallowed', () => {
   assert.strictEqual(e.dep, 'boundary-service');
   assert.match(e.detail, /zero-complaint employee inbox/);
 });
+
+// --- FINDING 2: the empty case was the one case never recorded -----------
+//
+// Both toV2 paths fall through an alias chain to []. The gap-log calls are
+// guarded by `if (raw.length)`, so an empty result was never witnessed - and
+// an empty TenantBoundary is exactly the Task 4 failure: the expander yields
+// an empty jurisdiction and the employee inbox comes back blank with a 200.
+// workflow.js closes the equivalent hole with recordTruncation(), which
+// compares v3's OWN totalCount against the rows that arrived. v3's boundary
+// endpoints report no totalCount, so the witness here is KEY PRESENCE.
+
+test('a relationship reply with a RENAMED envelope key is recorded', () => {
+  const before = gapLines().length;
+  // A future v3 build that renames "tenantBoundary".
+  const out = boundary.toV2(
+    { status: 200, json: { boundaryRelationships: [{ tenantId: 'pg', hierarchyType: 'ADMIN', boundary: [] }] } },
+    relReq(REL_QUERY)
+  );
+  // Behaviour is deliberately UNCHANGED: still an empty list, nothing invented.
+  assert.deepStrictEqual(out.TenantBoundary, []);
+
+  const g = gapLines().slice(before).find((x) => x.field === 'TenantBoundary[]' && x.action === 'unmapped');
+  assert.ok(g, 'a renamed relationship envelope must be witnessed');
+  assert.strictEqual(g.dep, 'boundary-service');
+  assert.match(g.detail, /"tenantBoundary"/);
+  assert.match(g.detail, /"TenantBoundary"/);
+  assert.match(g.detail, /boundaryRelationships/);
+  assert.match(g.detail, /zero rows with a 200|empty set/);
+});
+
+test('an HONEST empty relationship result records nothing - the key is present', () => {
+  const before = gapLines().length;
+  const out = boundary.toV2({ status: 200, json: { tenantBoundary: [] } }, relReq(REL_QUERY));
+  assert.deepStrictEqual(out.TenantBoundary, []);
+  assert.strictEqual(
+    gapLines().slice(before).some((x) => x.field === 'TenantBoundary[]' && x.action === 'unmapped'),
+    false,
+    'v3 saying "no such boundary" is a legitimate answer and must stay silent'
+  );
+});
+
+test('a boundary search with a renamed key is recorded; an honest miss is not', () => {
+  const before = gapLines().length;
+  const out = boundary.toV2({ status: 200, json: { boundaryList: [] } }, withShim({}, BOUNDARY_PATH, {}));
+  assert.deepStrictEqual(out.Boundary, []);
+  const g = gapLines().slice(before).find((x) => x.field === 'Boundary[]' && x.action === 'unmapped');
+  assert.ok(g, 'a renamed boundary envelope must be witnessed');
+  assert.match(g.detail, /"boundary"/);
+  assert.match(g.detail, /"boundaries"/);
+
+  const before2 = gapLines().length;
+  const honest = boundary.toV2({ status: 200, json: { boundary: [] } }, withShim({}, BOUNDARY_PATH, {}));
+  assert.deepStrictEqual(honest.Boundary, []);
+  assert.strictEqual(
+    gapLines().slice(before2).some((x) => x.field === 'Boundary[]' && x.action === 'unmapped'),
+    false,
+    'an empty "boundary" key is CCRS INVALID_BOUNDARY_CODE, not a shim gap'
+  );
+});
+
+test('the live v3 relationship reply does not trip the witness', () => {
+  const before = gapLines().length;
+  const out = boundary.toV2(LIVE_V3_REL, relReq(REL_QUERY));
+  assert.strictEqual(out.TenantBoundary.length, 1);
+  assert.strictEqual(
+    gapLines().slice(before).some((x) => x.action === 'unmapped'),
+    false,
+    'the verified live keys must stay quiet'
+  );
+});
+
+// --- FINDING 3: v3 error bodies were discarded ---------------------------
+
+test('a v3 400 on the boundary search carries its reason, not an empty Boundary', () => {
+  const before = gapLines().length;
+  const out = boundary.toV2(
+    { status: 400, json: [{ code: 'BAD_REQUEST', message: 'Missing required query parameter: codes',
+      description: '', params: [] }] },
+    withShim({}, BOUNDARY_PATH, {})
+  );
+  assert.strictEqual(out.Errors[0].code, 'BAD_REQUEST');
+  assert.match(out.Errors[0].message, /codes/);
+  assert.deepStrictEqual(out.Boundary, []);
+  const g = gapLines().slice(before).find((x) => x.field === 'Errors' && x.action === 'faked');
+  assert.ok(g, 'the rewrap must be recorded');
+  // An error must NOT be reported as a renamed envelope key.
+  assert.strictEqual(
+    gapLines().slice(before).some((x) => x.field === 'Boundary[]' && x.action === 'unmapped'),
+    false
+  );
+});
+
+test('a v3 400 on the relationship search is rewrapped the same way', () => {
+  const out = boundary.toV2(
+    { status: 400, json: [{ code: 'BAD_REQUEST', message: 'Missing X-Tenant-Id header' }] },
+    relReq(REL_QUERY)
+  );
+  assert.strictEqual(out.Errors[0].code, 'BAD_REQUEST');
+  assert.deepStrictEqual(out.TenantBoundary, []);
+});

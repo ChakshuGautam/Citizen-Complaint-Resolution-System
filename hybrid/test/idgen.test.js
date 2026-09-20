@@ -121,3 +121,10 @@ test('a 200 with no id at all is recorded as unmapped', () => {
   const g = gaps().slice(before).find((x) => x.field === 'idResponses');
   assert.ok(g && g.action === 'unmapped', 'expected an unmapped gap entry');
 });
+
+test('the translator declares its own dep, rather than relying on the route prefix', () => {
+  // server.js recordFailure() attributes an exception to translator.dep and
+  // falls back to the matched route PREFIX. Those two strings coincide here,
+  // so the attribution was right by accident until this was exported.
+  assert.strictEqual(idgen.dep, 'egov-idgen');
+});

@@ -563,12 +563,47 @@ function stateFromCode(code, tenantId, sla, which) {
 // boundary.js accepts "boundary" and "boundaries": the plan's contract sketch
 // wrote the v3 reply as {state:{code}}, and a later v3 build that nests the
 // state must not make this translator quietly report null.
-function currentStateOf(src) {
+function currentStateOf(src, ctx) {
   if (typeof src.currentState === 'string') return src.currentState;
   if (src.state && typeof src.state === 'object' && typeof src.state.code === 'string') {
     return src.state.code;
   }
   if (typeof src.state === 'string') return src.state;
+
+  // All three spellings missed. The alias chain above exists PRECISELY so that
+  // a later v3 build which nests or renames the state cannot make this
+  // translator quietly report null - but until now the miss itself was never
+  // witnessed. The failure mode it was written against therefore still ran
+  // silently: v3 renames `currentState`, the chain falls through, the shim
+  // answers HTTP 200 with a well-formed 2.x envelope whose
+  // state.applicationStatus is null, WorkflowService writes that null onto
+  // every complaint, and nothing errors and nothing is logged.
+  //
+  // Behaviour is deliberately unchanged (still null - inventing a state would
+  // be far worse than reporting none); the miss is now on the record. Note
+  // that a v3 4xx no longer reaches here at all: the toV2 entry points return
+  // errorEnvelope() above, so an empty body from a failed call cannot
+  // masquerade as a renamed key.
+  const keys = src && typeof src === 'object' ? Object.keys(src) : [];
+  gaplog.record({
+    dep: DEP,
+    field: 'ProcessInstances[].state.applicationStatus',
+    action: 'unmapped',
+    detail:
+      `v3 ${(ctx && ctx.which) || '(unnamed call)'} returned a process row carrying NONE of the ` +
+      'state spellings this translator knows. Keys tried, in order: "currentState" (a string - ' +
+      'what the live v3 build returns on BOTH the POST TransitionResponse and the GET ' +
+      'ProcessInstanceListResponse rows), "state.code" (a string, the shape the plan\'s contract ' +
+      'sketch predicted) and "state" (a bare string). The row carried ' +
+      `${keys.length ? `[${keys.slice(0, 25).join(', ')}]` : '(no keys at all)'}, with ` +
+      `typeof currentState=${typeof (src || {}).currentState} and typeof state=${typeof (src || {}).state}. ` +
+      'state.state / state.applicationStatus / state.code are all reported as NULL. This is the ' +
+      'quietest failure the shim can have: HTTP 200, a well-formed 2.x envelope, and ' +
+      'WorkflowService.getWorkflow writing applicationStatus=null onto every complaint it ' +
+      'enriches - no exception, no 4xx, nothing in any log but this line. TO BUILD: the state ' +
+      'code is the ONE fact the 2.x workflow contract cannot do without, so a real migration must ' +
+      'pin it by contract test against the v3 build it ships with, not by an alias chain.',
+  });
   return src.currentState === undefined ? undefined : src.currentState;
 }
 
@@ -604,7 +639,7 @@ function mapProcessInstance(v3pi, ctx) {
     // v3 has no moduleName. Echo what the 2.x request said, so a caller sees
     // what it sent; gap-logged in transitionToV3.
     moduleName: ctx.moduleName === undefined ? null : ctx.moduleName,
-    state: stateFromCode(currentStateOf(src), ctx.tenantId, null, ctx.which),
+    state: stateFromCode(currentStateOf(src, ctx), ctx.tenantId, null, ctx.which),
     notificationAction: null,
     comment: src.comment === undefined || src.comment === '' ? null : src.comment,
     documents: Array.isArray(src.documents) && src.documents.length ? src.documents : null,
@@ -634,7 +669,72 @@ function mapProcessInstance(v3pi, ctx) {
   return out;
 }
 
+// ---------------------------------------------------------------- v3 errors
+//
+// v3 reports a failure as a BARE ARRAY of {code,message,description,params}
+// with no envelope at all. Until now this translator threw that array away:
+// bodyOf() hands it back, every `body.<key>` lookup on an array is undefined,
+// and the caller received a null-filled 2.x envelope carrying the upstream
+// STATUS but not the REASON. server.js passes the status through (it does not
+// mask a 4xx as a 200) so this never cost correctness - it cost EVIDENCE, and
+// on the 409 "invalid state transition" this branch's COMMENT/ESCALATE finding
+// turns on, the reason IS the finding. Rewrap it under the 2.x `Errors` key
+// exactly as idgen.js and user.js do, and record the rewrap.
+function statusOf(v3Response) {
+  if (!v3Response || typeof v3Response !== 'object') return 200;
+  return typeof v3Response.status === 'number' ? v3Response.status : 200;
+}
+
+function errorEnvelope(v3Response, req2x, which, listKey) {
+  const status = statusOf(v3Response);
+  const json = v3Response && v3Response.json;
+  const raw = v3Response && typeof v3Response.raw === 'string' ? v3Response.raw : '';
+
+  let list = [];
+  if (Array.isArray(json)) list = json;
+  else if (json && Array.isArray(json.errors)) list = json.errors;
+  else if (json && (json.code || json.message)) list = [json];
+
+  const errors = list.length
+    ? list.map((e) => ({
+        code: e && e.code ? e.code : 'V3_ERROR',
+        message: e && e.message ? e.message : String(raw).slice(0, 500),
+        description: e && e.description ? e.description : null,
+        params: e && e.params ? e.params : null,
+      }))
+    : [
+        {
+          code: 'V3_ERROR',
+          message: String(raw).slice(0, 500) || `v3 ${which} failed with HTTP ${status}`,
+          description: null,
+          params: null,
+        },
+      ];
+
+  gaplog.record({
+    dep: DEP,
+    field: 'Errors',
+    action: 'faked',
+    detail:
+      `v3 ${which} answered HTTP ${status} with ${JSON.stringify(errors).slice(0, 400)}. DIGIT 3.0 ` +
+      'returns a BARE ARRAY of {code,message,description,params}; 2.x expects ' +
+      '{ResponseInfo, Errors:[...]}. Before this rewrap the array was discarded and the caller got ' +
+      `a null-filled ${listKey} envelope that carried the status but not the reason - most ` +
+      'consequentially on the 409 "invalid state transition" raised when a 2.x action v3 does not ' +
+      'know (COMMENT, ESCALATE) is attempted, where the message is the whole diagnosis. The status ' +
+      'is unchanged and still passed through by server.js, so nothing about pass/fail moves; only ' +
+      'the reason survives now. The 2.x error fields id/parentId have no v3 source and are absent.',
+  });
+
+  const out = { ResponseInfo: responseInfo(req2x, which), Errors: errors };
+  out[listKey] = [];
+  return out;
+}
+
 function transitionToV2(v3Response, req2x) {
+  if (statusOf(v3Response) >= 400) {
+    return errorEnvelope(v3Response, req2x, 'POST /workflow/v3/transition', 'ProcessInstances');
+  }
   const body = bodyOf(v3Response);
   const list = Array.isArray(req2x && req2x.ProcessInstances) ? req2x.ProcessInstances : [];
   const pi = list[0] && typeof list[0] === 'object' ? list[0] : {};
@@ -752,6 +852,9 @@ function mapDefinitionState(v3state, processId, tenantId) {
 }
 
 function businessServiceToV2(v3Response, req2x) {
+  if (statusOf(v3Response) >= 400) {
+    return errorEnvelope(v3Response, req2x, 'GET /workflow/v3/process/definition', 'BusinessServices');
+  }
   const body = bodyOf(v3Response);
   const defs = Array.isArray(body.definitions)
     ? body.definitions
@@ -920,6 +1023,9 @@ function processSearchToV3(req2x) {
 }
 
 function processSearchToV2(v3Response, req2x) {
+  if (statusOf(v3Response) >= 400) {
+    return errorEnvelope(v3Response, req2x, 'GET /workflow/v3/transition', 'ProcessInstances');
+  }
   const body = bodyOf(v3Response);
   const q = queryOf(req2x);
   const rows = Array.isArray(body.processInstances)

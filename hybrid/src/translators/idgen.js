@@ -145,7 +145,7 @@ function toV3(req2x) {
   const tenants = [...new Set(reqs.map((r) => (r && r.tenantId) || '').filter(Boolean))];
   const headers = {};
   if (tenants.length) {
-    const fromRequestInfo = context.toHeaders(req2x)['X-Tenant-ID'];
+    const fromRequestInfo = context.toHeaders(req2x, 'egov-idgen tenant cross-check')['X-Tenant-ID'];
     if (tenants.length > 1) {
       gaplog.record({
         dep: DEP,
@@ -237,4 +237,16 @@ function toV2(v3Response, req2x) {
   return out;
 }
 
-module.exports = { toV3, toV2 };
+module.exports = {
+  toV3,
+  toV2,
+  // server.js attributes a translator exception to the translator's own `dep`
+  // and falls back to the matched route PREFIX when there is none. For idgen
+  // the two strings happen to coincide ('/egov-idgen' -> 'egov-idgen'), so
+  // every exception entry this translator has ever produced was correctly
+  // attributed BY ACCIDENT. Declaring `dep` makes it correct on purpose, keeps
+  // the attribution right if the route is ever registered under a different
+  // prefix, and matches boundary.js, workflow.js and user.js, which all export
+  // theirs.
+  dep: DEP,
+};

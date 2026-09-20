@@ -348,15 +348,140 @@ function mapBoundary(v3b, fallbackTenantId) {
   };
 }
 
+// ---------------------------------------------------------------- v3 errors
+//
+// Same rewrap as idgen.js and user.js. v3 answers a failure with a BARE ARRAY
+// of {code,message,description,params} and no envelope; both toV2 paths below
+// used to discard it, because every `body.<key>` lookup on an array is
+// undefined, and hand back a null-filled 2.x envelope carrying the upstream
+// STATUS but not the REASON. server.js passes the status through, so this was
+// never a correctness bug - it was an EVIDENCE bug, and evidence is the point
+// of this branch.
+function statusOf(v3Response) {
+  if (!v3Response || typeof v3Response !== 'object') return 200;
+  return typeof v3Response.status === 'number' ? v3Response.status : 200;
+}
+
+function errorEnvelope(v3Response, req2x, which, listKey) {
+  const status = statusOf(v3Response);
+  const json = v3Response && v3Response.json;
+  const raw = v3Response && typeof v3Response.raw === 'string' ? v3Response.raw : '';
+
+  let list = [];
+  if (Array.isArray(json)) list = json;
+  else if (json && Array.isArray(json.errors)) list = json.errors;
+  else if (json && (json.code || json.message)) list = [json];
+
+  const errors = list.length
+    ? list.map((e) => ({
+        code: e && e.code ? e.code : 'V3_ERROR',
+        message: e && e.message ? e.message : String(raw).slice(0, 500),
+        description: e && e.description ? e.description : null,
+        params: e && e.params ? e.params : null,
+      }))
+    : [
+        {
+          code: 'V3_ERROR',
+          message: String(raw).slice(0, 500) || `v3 ${which} failed with HTTP ${status}`,
+          description: null,
+          params: null,
+        },
+      ];
+
+  gaplog.record({
+    dep: DEP,
+    field: 'Errors',
+    action: 'faked',
+    detail:
+      `v3 ${which} answered HTTP ${status} with ${JSON.stringify(errors).slice(0, 400)}. DIGIT 3.0 ` +
+      'returns a BARE ARRAY of {code,message,description,params}; 2.x expects ' +
+      '{ResponseInfo, Errors:[...]}. Before this rewrap the array was discarded and the caller got ' +
+      `an empty ${listKey} envelope carrying the status but not the reason - and on THIS service an ` +
+      'empty list is not a neutral shape: it is the legitimate answer "no such boundary". The ' +
+      'status is unchanged and still passed through by server.js, so nothing about pass/fail ' +
+      'moves; only the reason survives now. The 2.x error fields id/parentId have no v3 source.',
+  });
+
+  const out = { ResponseInfo: responseInfo(req2x, which), Errors: errors };
+  out[listKey] = [];
+  return out;
+}
+
+// ------------------------------------------------- response-level key witness
+//
+// workflow.js closes the equivalent hole with recordTruncation(): it compares
+// v3's OWN totalCount against the rows that actually arrived, so a short - or
+// renamed - envelope is witnessed at the RESPONSE level instead of being
+// inferred from an empty list. The v3 boundary endpoints report no totalCount,
+// so the equivalent witness here is KEY PRESENCE.
+//
+// Both toV2 paths fall through an alias chain to `[]`, and both gap-log calls
+// are guarded by `if (raw.length)` - so the one case never recorded is the
+// EMPTY one, which has two very different causes:
+//
+//   * v3 answered `{"boundary": []}` / `{"tenantBoundary": []}` - an HONEST
+//     miss (a code that does not exist, or the right code under the wrong
+//     tenant). The live 2.x service answers exactly the same way and CCRS
+//     turns it into INVALID_BOUNDARY_CODE itself, so this must stay silent and
+//     must never be faked into a hit.
+//   * v3 answered 200 carrying NONE of the spellings the chain knows - a
+//     RENAMED envelope. The chain yields [], the shim returns
+//     `TenantBoundary: []`, BoundaryHierarchyExpander.fetch expands the
+//     employee's jurisdiction to the empty set (it swallows any failure and
+//     falls back to the unexpanded code), and the inbox comes back with zero
+//     complaints, HTTP 200 and no error anywhere. That is the Task 4 bug
+//     verbatim - the one this whole translator exists because of.
+//
+// Key presence separates the two. This is a FUTURE-v3 hazard, not a live one:
+// the current v3 keys are verified live and this witness stays quiet on them.
+// Nothing about the reply changes - the same [] goes out either way - the case
+// is only made visible.
+function envelopeArrayOf(body, keys, field, which, req2x) {
+  const found = keys.find((k) => Array.isArray(body && body[k]));
+  if (found) return body[found];
+
+  const seen = body && typeof body === 'object' ? Object.keys(body) : [];
+  const shim = req2x && req2x.__shim;
+  const path = (shim && shim.path) || '(no path on req2x.__shim)';
+  const query = shim && shim.query ? JSON.stringify(shim.query) : '(no query)';
+  gaplog.record({
+    dep: DEP,
+    field,
+    action: 'unmapped',
+    detail:
+      `v3 ${which} answered 2xx but carried NO recognised list key for 2.x ${path} ${query}. ` +
+      `Keys tried, in order: ${keys.map((k) => JSON.stringify(k)).join(', ')} - none of them held ` +
+      `an array. The body carried ${seen.length ? `[${seen.slice(0, 25).join(', ')}]` : '(no keys at all)'}. ` +
+      `The shim returned ${field} as an EMPTY LIST, which is indistinguishable, to every 2.x ` +
+      'caller and to this shim, from v3 honestly reporting "no such boundary" - HTTP 200, ' +
+      'well-formed envelope, no error. That ambiguity is the failure this entry exists to break: ' +
+      'an honest empty answer arrives with the key PRESENT and empty and is recorded nowhere, ' +
+      'while a renamed or missing key arrives here. Nothing was padded or invented; the list is ' +
+      'still empty. Concretely, on the relationship path an empty TenantBoundary makes ' +
+      'BoundaryHierarchyExpander.fetch expand the employee jurisdiction to the empty set and the ' +
+      'employee complaint search return zero rows with a 200. TO BUILD: a real migration must pin ' +
+      'these envelope key names by contract test rather than by an alias chain, because neither ' +
+      'stack reconciles the two spellings and neither reports which one it used.',
+  });
+  return [];
+}
+
 function boundaryToV2(v3Response, req2x) {
+  if (statusOf(v3Response) >= 400) {
+    return errorEnvelope(v3Response, req2x, 'GET /boundary/v3/boundaries', 'Boundary');
+  }
   const body = bodyOf(v3Response);
   // v3 says "boundary"; the plan's contract sketch said "boundaries". Accept
   // both so a later v3 build that renames the key does not silently return [].
-  const raw = Array.isArray(body.boundary)
-    ? body.boundary
-    : Array.isArray(body.boundaries)
-      ? body.boundaries
-      : [];
+  // A miss on BOTH is now witnessed rather than inferred - see
+  // envelopeArrayOf() above; the fallback value is unchanged.
+  const raw = envelopeArrayOf(
+    body,
+    ['boundary', 'boundaries'],
+    'Boundary[]',
+    'GET /boundary/v3/boundaries',
+    req2x
+  );
 
   const fallbackTenantId = tenantOf(req2x);
   const list = raw.map((b) => mapBoundary(b && typeof b === 'object' ? b : {}, fallbackTenantId));
@@ -451,12 +576,19 @@ function mapNode(v3node, droppedAudit) {
 }
 
 function relationshipToV2(v3Response, req2x) {
+  if (statusOf(v3Response) >= 400) {
+    return errorEnvelope(v3Response, req2x, 'GET /boundary/v3/relationship', 'TenantBoundary');
+  }
   const body = bodyOf(v3Response);
-  const raw = Array.isArray(body.tenantBoundary)
-    ? body.tenantBoundary
-    : Array.isArray(body.TenantBoundary)
-      ? body.TenantBoundary
-      : [];
+  // A miss on both spellings is now witnessed - see envelopeArrayOf() above.
+  // The fallback value is unchanged: still an empty list.
+  const raw = envelopeArrayOf(
+    body,
+    ['tenantBoundary', 'TenantBoundary'],
+    'TenantBoundary[]',
+    'GET /boundary/v3/relationship',
+    req2x
+  );
 
   const fallbackTenantId = tenantOf(req2x);
   const droppedAudit = [];

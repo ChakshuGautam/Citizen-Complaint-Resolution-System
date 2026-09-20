@@ -451,3 +451,103 @@ test('undefined and null are rejected the same way', () => {
   assert.throws(() => wf.toV3(undefined), /carried no __shim/);
   assert.throws(() => wf.toV3(null), /carried no __shim/);
 });
+
+// --- FINDING 1: the state alias chain was never instrumented -------------
+//
+// currentStateOf() accepts three spellings of the v3 state code precisely so a
+// later v3 build that nests or renames it cannot make this translator quietly
+// report null. When all three missed, it reported null and recorded NOTHING.
+
+test('a v3 row with none of the three state spellings is recorded, not silently nulled', () => {
+  const before = gaps().length;
+  const r = req({ RequestInfo: { userInfo: { uuid: 'u-1', tenantId: 'pg' } } },
+    { path: PROC_SEARCH, query: { tenantId: 'pg', businessIds: 'PG-PGR-1' } });
+  // A future v3 build that renames `currentState` to `currentStatus`.
+  const out = wf.toV2({ status: 200, json: { totalCount: 1, processInstances: [
+    { id: 'pi-1', processCode: 'PGR', entityId: 'PG-PGR-1', action: 'APPLY',
+      currentStatus: 'PENDINGFORASSIGNMENT' },
+  ] } }, r);
+
+  // Behaviour is unchanged: still null, nothing invented.
+  assert.strictEqual(out.ProcessInstances[0].state.applicationStatus, null);
+  assert.strictEqual(out.ProcessInstances[0].state.state, null);
+  assert.strictEqual(out.ProcessInstances[0].state.code, null);
+
+  const g = gaps().slice(before).find((x) => x.field === 'ProcessInstances[].state.applicationStatus');
+  assert.ok(g, 'the state-code lookup miss must be recorded');
+  assert.strictEqual(g.action, 'unmapped');
+  assert.strictEqual(g.dep, 'egov-workflow-v2');
+  // The entry must name the keys tried and the payload shape actually seen.
+  assert.match(g.detail, /currentState/);
+  assert.match(g.detail, /state\.code/);
+  assert.match(g.detail, /currentStatus/);
+});
+
+test('each of the three accepted spellings resolves and records no state gap', () => {
+  const shapes = [
+    { currentState: 'RESOLVED' },
+    { state: { code: 'RESOLVED' } },
+    { state: 'RESOLVED' },
+  ];
+  for (const extra of shapes) {
+    const before = gaps().length;
+    const r = req({ RequestInfo: { userInfo: { uuid: 'u-1', tenantId: 'pg' } } },
+      { path: PROC_SEARCH, query: { tenantId: 'pg', businessIds: 'PG-PGR-1' } });
+    const out = wf.toV2({ status: 200, json: { totalCount: 1, processInstances: [
+      Object.assign({ id: 'pi-1', processCode: 'PGR', entityId: 'PG-PGR-1' }, extra),
+    ] } }, r);
+    assert.strictEqual(out.ProcessInstances[0].state.applicationStatus, 'RESOLVED');
+    assert.strictEqual(
+      gaps().slice(before).some((x) => x.field === 'ProcessInstances[].state.applicationStatus'),
+      false,
+      `${JSON.stringify(extra)} must resolve without a gap`
+    );
+  }
+});
+
+// --- FINDING 3: v3 error bodies were discarded ---------------------------
+
+test('a 409 transition carries v3\'s reason through, instead of a null-filled envelope', () => {
+  const before = gaps().length;
+  const r = req({ RequestInfo: { userInfo: { uuid: 'u-1', tenantId: 'pg' } },
+    ProcessInstances: [{ businessService: 'PGR', businessId: 'PG-PGR-1', action: 'COMMENT' }] },
+    { path: TRANSITION });
+  const out = wf.toV2({ status: 409, json: [
+    { code: 'INVALID_TRANSITION', message: 'action COMMENT is not valid in state PENDINGATLME',
+      description: '', params: [] },
+  ] }, r);
+
+  assert.strictEqual(out.Errors[0].code, 'INVALID_TRANSITION');
+  assert.match(out.Errors[0].message, /COMMENT/);
+  assert.deepStrictEqual(out.ProcessInstances, [], 'no fabricated null-filled instance');
+  const g = gaps().slice(before).find((x) => x.field === 'Errors');
+  assert.ok(g && g.action === 'faked', 'the rewrap must be recorded');
+  assert.match(g.detail, /HTTP 409/);
+});
+
+test('a 4xx on the two search paths is rewrapped too, and never reaches the row mapper', () => {
+  for (const [p, key, q] of [
+    [BS_SEARCH, 'BusinessServices', { tenantId: 'pg', businessServices: 'PGR' }],
+    [PROC_SEARCH, 'ProcessInstances', { tenantId: 'pg', businessIds: 'PG-PGR-1' }],
+  ]) {
+    const before = gaps().length;
+    const r = req({ RequestInfo: { userInfo: { uuid: 'u-1', tenantId: 'pg' } } }, { path: p, query: q });
+    const out = wf.toV2({ status: 500, json: [{ code: 'INTERNAL', message: 'boom' }] }, r);
+    assert.strictEqual(out.Errors[0].code, 'INTERNAL');
+    assert.deepStrictEqual(out[key], []);
+    // A failed call must not be mistaken for a renamed state key.
+    assert.strictEqual(
+      gaps().slice(before).some((x) => x.field === 'ProcessInstances[].state.applicationStatus'),
+      false,
+      'an error body must not be reported as a state-lookup miss'
+    );
+  }
+});
+
+test('a 4xx with an unparseable body still yields an Errors array', () => {
+  const r = req({ RequestInfo: { userInfo: { uuid: 'u-1', tenantId: 'pg' } } },
+    { path: BS_SEARCH, query: { tenantId: 'pg' } });
+  const out = wf.toV2({ status: 502, json: null, raw: '<html>bad gateway</html>' }, r);
+  assert.strictEqual(out.Errors[0].code, 'V3_ERROR');
+  assert.match(out.Errors[0].message, /bad gateway/);
+});
