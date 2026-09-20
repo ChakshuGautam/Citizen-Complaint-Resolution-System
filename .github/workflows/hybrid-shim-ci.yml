@@ -3,9 +3,11 @@ name: Hybrid Shim CI
 # The CCRS x DIGIT 3.0 translation shim (hybrid/) has no npm dependencies and
 # no services to stand up, so its unit suite runs anywhere Node does.
 #
-# Note the test invocation: `node --test test/` (with the trailing slash) runs
-# the suite on Node 20 but fails on Node 22 with "Cannot find module .../test".
-# The glob form works on both, and the matrix below is here to keep it that way.
+# Note the test invocation. Three forms, two of which are version-dependent:
+#   node --test test/            works on 20, fails on 22 ("Cannot find module .../test")
+#   node --test "test/*.test.js" works on 22, fails on 20 (no Node-side glob before 21)
+#   node --test test/*.test.js   works on BOTH - the shell expands it
+# The matrix exists to keep that true. It caught both failures, one at a time.
 
 on:
   push:
@@ -48,7 +50,10 @@ jobs:
           fi
 
       - name: Unit tests
-        run: node --test "test/*.test.js"
+        # Unquoted on purpose: the shell expands it, so this works on both.
+        # A quoted glob needs Node's own glob support (21+) and fails on 20;
+        # `node --test test/` (a directory) works on 20 and fails on 22.
+        run: node --test test/*.test.js
 
   instruments:
     name: Measuring instruments intact
