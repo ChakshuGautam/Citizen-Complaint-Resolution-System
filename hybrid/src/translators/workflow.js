@@ -121,8 +121,12 @@
 //    2.x's businessIds search carries NO business service. The shim supplies
 //    WORKFLOW_PROCESS_CODE (default PGR) and gap-logs 'defaulted' every time.
 //  * `moduleName` and `notificationAction` have no v3 field.
-//  * v3 caps `size` at 100 (400 above it), so a history longer than 100
-//    transitions is silently truncated by v3's paging.
+//  * v3 caps `size` at 100 (400 above it) and pages every list endpoint, while
+//    2.x pages none and the 2.x envelope has no paging field. A truncated reply
+//    is therefore indistinguishable from a complete one. The shim cannot page
+//    (one request in, one request out), so on the way back it compares v3's own
+//    `totalCount` to the rows that arrived and gap-logs the shortfall per
+//    request - see recordTruncation(). It pads nothing.
 //  * `additionalDetails` IS ACCEPTED AND DISCARDED on process definitions and
 //    states. The spec declares it free-form on both; reading the registered PGR
 //    definition back shows it absent at both levels. So there is nowhere to
@@ -284,6 +288,42 @@ function bodyOf(v3Response) {
   return v3Response;
 }
 
+// v3 pages every list endpoint and caps `size` at 100 (400 above it); 2.x pages
+// none of them and returns everything. So a v3 reply can be SHORT and still say
+// 200 OK, and neither CCRS nor the 2.x envelope has any field to carry "there
+// was more". The only witness is v3's own `totalCount`, which the shim
+// otherwise discards - so compare it to what actually arrived and record the
+// shortfall PER REQUEST. Nothing is padded and nothing is paged: the point is
+// that v3 truncated and the 2.x caller cannot tell.
+function recordTruncation(body, rowCount, which, req2x) {
+  const total = body && typeof body.totalCount === 'number' ? body.totalCount : null;
+  if (total === null || total <= rowCount) return false;
+  const shim = req2x && req2x.__shim;
+  const path = (shim && shim.path) || '(no path on req2x.__shim)';
+  const query = shim && shim.query ? JSON.stringify(shim.query) : '(no query)';
+  gaplog.record({
+    dep: DEP,
+    field: 'totalCount',
+    action: 'dropped',
+    detail:
+      `v3 TRUNCATED this result and the 2.x caller cannot tell. ${which} for 2.x ${path} ` +
+      `${query} reported totalCount=${total} but returned only ${rowCount} row(s); the shim asked ` +
+      `for size=${V3_MAX_SIZE}, which is v3's maximum (it answers 400 "size must be an integer ` +
+      `between 1 and 100" above it). ${total - rowCount} row(s) were dropped. The 2.x ` +
+      'ProcessInstanceResponse / BusinessServiceResponse envelope has no paging field at all, so ' +
+      'the short list is indistinguishable from a complete one - HTTP 200, no error, fewer ' +
+      'results. Nothing is padded or re-fetched here: the one-request-in / one-request-out ' +
+      'translator contract cannot page, and inventing rows would be worse than reporting the ' +
+      'shortfall. Two concrete consequences: an assignee inbox search ' +
+      '(WorkflowService.getServiceRequestIdsByAssignee) silently loses every complaint past the ' +
+      'hundredth, and a history search past 100 transitions makes ' +
+      'NotificationService.getEmployeeName scan an incomplete history for the last ASSIGN and ' +
+      'resolve the wrong assignee or none. TO BUILD: 2.x callers behind a paging service must be ' +
+      'changed to page, or v3 must offer an unbounded fetch for internal callers.',
+  });
+  return true;
+}
+
 // v3: {createdBy, createdTime, modifiedBy, modifiedTime} under `auditDetail`
 // 2.x: {createdBy, createdTime, lastModifiedBy, lastModifiedTime} under `auditDetails`
 function mapAudit(v3Audit) {
@@ -325,22 +365,35 @@ function routeOf(req2x) {
 
 function unknownRoute(req2x) {
   const shim = req2x && req2x.__shim;
-  const path = (shim && shim.path) || '(no path on req2x.__shim)';
+  const hasContext = Boolean(shim && shim.path);
+  const path = hasContext ? shim.path : '(no path: req2x carried no __shim)';
   gaplog.record({
     dep: DEP,
     field: path,
     action: 'unmapped',
-    detail:
-      `EGOV_WORKFLOW_HOST now points at the shim and CCRS called ${path}, which is none of the ` +
-      `three 2.x workflow paths this translator has a verified v3 counterpart for ` +
-      `(${TRANSITION_2X}, ${BUSINESSSERVICE_SEARCH_2X}, ${PROCESS_SEARCH_2X}). Refusing to guess: ` +
-      'answering a plausible envelope to an unknown workflow call is how the Task 4 boundary ' +
-      'switchover returned zero complaints with HTTP 200 and no error. The shim throws (502 ' +
-      'SHIM_ERROR), so an unhandled sub-path is loud.',
+    detail: hasContext
+      ? `EGOV_WORKFLOW_HOST now points at the shim and CCRS called ${path}, which is none of the ` +
+        `three 2.x workflow paths this translator has a verified v3 counterpart for ` +
+        `(${TRANSITION_2X}, ${BUSINESSSERVICE_SEARCH_2X}, ${PROCESS_SEARCH_2X}). Refusing to guess: ` +
+        'answering a plausible envelope to an unknown workflow call is how the Task 4 boundary ' +
+        'switchover returned zero complaints with HTTP 200 and no error. The shim throws (502 ' +
+        'SHIM_ERROR), so an unhandled sub-path is loud.'
+      : 'A request reached the workflow translator with no __shim transport context, so there is ' +
+        'no inbound path to dispatch on. server.js sets __shim on EVERY request ' +
+        '(makeReq2x), so this cannot happen on a live path - it means the translator was called ' +
+        'directly, by a test or by future code. Refusing to fall back to body-shape guessing: ' +
+        'that fallback would have dispatched an unknown call as a businessservice search and ' +
+        'answered a plausible empty envelope, which is exactly the Task 4 failure mode. Throwing ' +
+        'instead.',
   });
   const err = new Error(
-    `workflow translator: unsupported 2.x workflow path ${path} ` +
-      `(expected ${TRANSITION_2X}, ${BUSINESSSERVICE_SEARCH_2X} or ${PROCESS_SEARCH_2X})`
+    hasContext
+      ? `workflow translator: unsupported 2.x workflow path ${path} ` +
+        `(expected ${TRANSITION_2X}, ${BUSINESSSERVICE_SEARCH_2X} or ${PROCESS_SEARCH_2X})`
+      : 'workflow translator: req2x carried no __shim transport context, so the inbound 2.x path ' +
+        'is unknown and no route can be chosen. server.js always sets it; a direct caller must ' +
+        'supply {__shim:{path}} naming one of ' +
+        `${TRANSITION_2X}, ${BUSINESSSERVICE_SEARCH_2X} or ${PROCESS_SEARCH_2X}.`
   );
   err.shimUnmapped = true;
   throw err;
@@ -729,6 +782,8 @@ function businessServiceToV2(v3Response, req2x) {
     };
   });
 
+  recordTruncation(body, defs.length, 'GET /workflow/v3/process/definition', req2x);
+
   if (defs.length) {
     gaplog.record({
       dep: DEP,
@@ -840,7 +895,10 @@ function processSearchToV3(req2x) {
         '/workflow/v3/transition?history=true returns every transition row oldest-first, which ' +
         'matches 2.x. The cap does not: v3 refuses size>100 (400 "size must be an integer between ' +
         `1 and 100"), so the shim asks for ${V3_MAX_SIZE} and a complaint with a longer history ` +
-        'is truncated by v3 paging with no error. The translator contract cannot page.',
+        'is truncated by v3 paging with no error. The translator contract cannot page. Whether ' +
+        'that actually bit on THIS request is recorded separately on the way back, as a ' +
+        "'totalCount' entry, by comparing v3's own totalCount to the rows it returned - this " +
+        'entry only says the cap was applied.',
     });
   }
 
@@ -883,6 +941,8 @@ function processSearchToV2(v3Response, req2x) {
 
   const list = rows.map((r) => mapProcessInstance(r, ctx));
 
+  recordTruncation(body, rows.length, 'GET /workflow/v3/transition', req2x);
+
   if (rows.length) {
     gaplog.record({
       dep: DEP,
@@ -910,19 +970,18 @@ function processSearchToV2(v3Response, req2x) {
 
 // ---------------------------------------------------------------- dispatch
 
+// There is NO body-shape fallback. An earlier version dispatched on the body
+// when __shim was absent, so that a unit test could call the translator
+// directly - and the cost of that affordance was that an unrecognised call
+// would have been served as a businessservice search and answered a plausible
+// empty envelope. That is the Task 4 failure mode, kept alive in production
+// code for the convenience of tests. server.js sets __shim on every request
+// (makeReq2x), so no live caller is affected; the tests construct one.
 function toV3(req2x) {
   const route = routeOf(req2x);
   if (route === 'transition') return transitionToV3(req2x);
   if (route === 'businessservice') return businessServiceToV3(req2x);
   if (route === 'processsearch') return processSearchToV3(req2x);
-  // No path at all means a unit test calling the translator directly. Dispatch
-  // on the body shape instead: a ProcessInstances list is unambiguously a
-  // transition; anything else is the businessservice search.
-  if (!req2x || !req2x.__shim) {
-    return Array.isArray(req2x && req2x.ProcessInstances)
-      ? transitionToV3(req2x)
-      : businessServiceToV3(req2x);
-  }
   return unknownRoute(req2x);
 }
 
@@ -931,11 +990,6 @@ function toV2(v3Response, req2x) {
   if (route === 'businessservice') return businessServiceToV2(v3Response, req2x);
   if (route === 'processsearch') return processSearchToV2(v3Response, req2x);
   if (route === 'transition') return transitionToV2(v3Response, req2x);
-  if (!req2x || !req2x.__shim) {
-    return Array.isArray(req2x && req2x.ProcessInstances)
-      ? transitionToV2(v3Response, req2x)
-      : businessServiceToV2(v3Response, req2x);
-  }
   return unknownRoute(req2x);
 }
 

@@ -45,13 +45,24 @@ function lastGapFor(field) {
 }
 
 // ================================================================
-// The two contract tests from the task brief, verbatim.
+// The two contract tests from the task brief.
+//
+// The bodies and every assertion are the brief's, unchanged. The ONE
+// difference is that each request is wrapped in req(..., {path}) so it carries
+// the __shim transport context server.js always supplies. The brief's literals
+// relied on a body-shape fallback inside toV3/toV2 for the case where __shim
+// was absent - and that fallback was removed, because it meant an
+// unrecognised live call would have been dispatched as a businessservice
+// search and answered a plausible empty envelope instead of throwing. Keeping
+// a test affordance alive in production code at that price was the wrong
+// trade; the tests construct the context the real caller always has.
 // ================================================================
 
 test('maps a 2.x transition to the v3 transition call', () => {
-  const r = { RequestInfo: { userInfo: { uuid: 'u-1', tenantId: 'mz' } },
+  const r = req({ RequestInfo: { userInfo: { uuid: 'u-1', tenantId: 'mz' } },
     ProcessInstances: [{ tenantId: 'mz', businessService: 'PGR', businessId: 'PGR-123',
-                         action: 'ASSIGN', moduleName: 'PGR', assignes: [{ uuid: 'emp-1' }] }] };
+                         action: 'ASSIGN', moduleName: 'PGR', assignes: [{ uuid: 'emp-1' }] }] },
+    { path: TRANSITION });
   const out = wf.toV3(r);
   assert.strictEqual(out.method, 'POST');
   assert.strictEqual(out.path, '/workflow/v3/transition');
@@ -60,7 +71,8 @@ test('maps a 2.x transition to the v3 transition call', () => {
 });
 
 test('rebuilds the 2.x ProcessInstances envelope', () => {
-  const v2 = wf.toV2({ state: { code: 'PENDINGFORASSIGNMENT' } }, { ProcessInstances: [{ businessId: 'PGR-123' }] });
+  const v2 = wf.toV2({ state: { code: 'PENDINGFORASSIGNMENT' } },
+    req({ ProcessInstances: [{ businessId: 'PGR-123' }] }, { path: TRANSITION }));
   assert.strictEqual(v2.ProcessInstances[0].state.code, 'PENDINGFORASSIGNMENT');
 });
 
@@ -360,4 +372,82 @@ test('a fourth workflow path throws loudly instead of guessing an envelope', () 
 
 test('the translator names itself, so a failure is attributed to egov-workflow-v2', () => {
   assert.strictEqual(wf.dep, 'egov-workflow-v2');
+});
+
+// ================================================================
+// Regression: silent truncation, and the removed body-shape fallback
+// ================================================================
+
+test('process search: a short v3 page is recorded as truncation, not passed off as the whole list', () => {
+  const r = req({ RequestInfo: { userInfo: { uuid: 'u-1', tenantId: 'pg' } } },
+    { path: PROC_SEARCH, query: { tenantId: 'pg', businessService: 'PGR', assignee: 'emp-1' } });
+  const rows = Array.from({ length: 100 }, (_, i) => ({
+    id: `pi-${i}`, processCode: 'PGR', entityId: `PG-PGR-${i}`, action: 'ASSIGN',
+    currentState: 'PENDINGATLME',
+  }));
+  const out = wf.toV2({ status: 200, json: { totalCount: 137, page: 0, size: 100, processInstances: rows } }, r);
+
+  // Nothing is padded or invented - the caller gets exactly what v3 sent.
+  assert.strictEqual(out.ProcessInstances.length, 100);
+
+  const g = lastGapFor('totalCount');
+  assert.strictEqual(g.action, 'dropped');
+  assert.match(g.detail, /totalCount=137/);
+  assert.match(g.detail, /only 100 row\(s\)/);
+  assert.match(g.detail, /37 row\(s\) were dropped/);
+  // The entry names the 2.x path it came from, so the gap log says WHICH call lost rows.
+  assert.match(g.detail, /process\/_search/);
+});
+
+test('process search: a complete v3 page records no truncation', () => {
+  const before = gaps().length;
+  const r = req({ RequestInfo: { userInfo: { uuid: 'u-1', tenantId: 'pg' } } },
+    { path: PROC_SEARCH, query: { tenantId: 'pg', businessIds: 'PG-PGR-1' } });
+  const out = wf.toV2({ status: 200, json: { totalCount: 1, page: 0, size: 100, processInstances: [
+    { id: 'pi-1', processCode: 'PGR', entityId: 'PG-PGR-1', action: 'APPLY',
+      currentState: 'PENDINGFORASSIGNMENT' },
+  ] } }, r);
+  assert.strictEqual(out.ProcessInstances.length, 1);
+  assert.strictEqual(gaps().slice(before).some((g) => g.field === 'totalCount'), false);
+});
+
+test('process search: an empty result with totalCount 0 records no truncation', () => {
+  const before = gaps().length;
+  const r = req({ RequestInfo: { userInfo: { uuid: 'u-1', tenantId: 'pg' } } },
+    { path: PROC_SEARCH, query: { tenantId: 'pg', businessService: 'PGR', assignee: 'nobody' } });
+  wf.toV2({ status: 200, json: { totalCount: 0, page: 0, size: 100, processInstances: [] } }, r);
+  assert.strictEqual(gaps().slice(before).some((g) => g.field === 'totalCount'), false);
+});
+
+test('businessservice search: a short definition page is recorded too', () => {
+  const r = req({ RequestInfo: { userInfo: { uuid: 'u-1', tenantId: 'pg' } } },
+    { path: BS_SEARCH, query: { tenantId: 'pg' } });
+  wf.toV2({ status: 200, json: { totalCount: 4, page: 0, size: 100, definitions: [
+    { id: 'p1', code: 'PGR', name: 'PGR', states: [] },
+  ] } }, r);
+  const g = lastGapFor('totalCount');
+  assert.match(g.detail, /totalCount=4/);
+  assert.match(g.detail, /businessservice\/_search/);
+});
+
+test('a request with no __shim throws instead of being guessed from its body shape', () => {
+  // The removed fallback would have served this as a businessservice search
+  // and answered {BusinessServices: []} - HTTP 200, plausible, wrong.
+  const bare = { RequestInfo: { userInfo: { uuid: 'u-1', tenantId: 'pg' } } };
+  assert.throws(() => wf.toV3(bare), /carried no __shim/);
+  assert.throws(() => wf.toV2({ status: 200, json: {} }, bare), /carried no __shim/);
+  const g = lastGapFor('(no path: req2x carried no __shim)');
+  assert.strictEqual(g.action, 'unmapped');
+});
+
+test('a transition-shaped body with no __shim also throws, rather than being recognised', () => {
+  const bare = { RequestInfo: { userInfo: { uuid: 'u-1', tenantId: 'pg' } },
+    ProcessInstances: [{ businessService: 'PGR', businessId: 'X', action: 'ASSIGN' }] };
+  assert.throws(() => wf.toV3(bare), /carried no __shim/);
+  assert.throws(() => wf.toV2({ status: 200, json: {} }, bare), /carried no __shim/);
+});
+
+test('undefined and null are rejected the same way', () => {
+  assert.throws(() => wf.toV3(undefined), /carried no __shim/);
+  assert.throws(() => wf.toV3(null), /carried no __shim/);
 });
