@@ -183,21 +183,34 @@ function routeOf(req2x) {
 
 function unknownRoute(req2x) {
   const shim = req2x && req2x.__shim;
-  const path = (shim && shim.path) || '(no path on req2x.__shim)';
+  const hasContext = Boolean(shim && shim.path);
+  const path = hasContext ? shim.path : '(no path: req2x carried no __shim)';
   gaplog.record({
     dep: DEP,
     field: path,
     action: 'unmapped',
-    detail:
-      `EGOV_BOUNDARY_HOST now points at the shim, and CCRS called ${path}, which is neither ` +
-      `${BOUNDARY_SEARCH} nor ${RELATIONSHIP_SEARCH} - the only two 2.x boundary endpoints this ` +
-      'translator has a verified v3 counterpart for. Refusing to guess: answering a boundary ' +
-      'envelope to an unknown boundary call is exactly the failure that made the first switchover ' +
-      'return zero complaints with no error. The shim throws, which surfaces as 502 SHIM_ERROR.',
+    detail: hasContext
+      ? `EGOV_BOUNDARY_HOST now points at the shim, and CCRS called ${path}, which is neither ` +
+        `${BOUNDARY_SEARCH} nor ${RELATIONSHIP_SEARCH} - the only two 2.x boundary endpoints this ` +
+        'translator has a verified v3 counterpart for. Refusing to guess: answering a boundary ' +
+        'envelope to an unknown boundary call is exactly the failure that made the first switchover ' +
+        'return zero complaints with no error. The shim throws, which surfaces as 502 SHIM_ERROR.'
+      : 'A request reached the boundary translator with no __shim transport context, so there is ' +
+        'no inbound path to dispatch on. server.js sets __shim on EVERY request (makeReq2x), so ' +
+        'this cannot happen on a live path - it means the translator was called directly, by a ' +
+        'test or by future code. Refusing to fall back to the boundary search as a default: that ' +
+        'default would have answered an unknown call with a {ResponseInfo, Boundary: []} envelope ' +
+        'carrying NO TenantBoundary key, which BoundaryHierarchyExpander.fetch turns into an empty ' +
+        'jurisdiction and a zero-complaint employee inbox - HTTP 200, no error. That is the Task 4 ' +
+        'failure mode exactly. Throwing instead.',
   });
   const err = new Error(
-    `boundary translator: unsupported 2.x boundary path ${path} ` +
-      `(expected ${BOUNDARY_SEARCH} or ${RELATIONSHIP_SEARCH})`
+    hasContext
+      ? `boundary translator: unsupported 2.x boundary path ${path} ` +
+        `(expected ${BOUNDARY_SEARCH} or ${RELATIONSHIP_SEARCH})`
+      : 'boundary translator: req2x carried no __shim transport context, so the inbound 2.x path ' +
+        'is unknown and no route can be chosen. server.js always sets it; a direct caller must ' +
+        `supply {__shim:{path}} naming one of ${BOUNDARY_SEARCH} or ${RELATIONSHIP_SEARCH}.`
   );
   err.shimUnmapped = true;
   throw err;
@@ -504,20 +517,29 @@ function relationshipToV2(v3Response, req2x) {
 
 // ---------------------------------------------------------------- dispatch
 
+// There is NO fallback to the boundary search when the route cannot be
+// determined. An earlier version defaulted to it whenever req2x carried no
+// __shim (toV3) or whenever the path was not the relationship one (toV2), so a
+// unit test could call the translator with a bare body. The cost of that
+// affordance was that an undetermined call would have been answered with a
+// {ResponseInfo, Boundary: []} envelope - no TenantBoundary key, no error - and
+// BoundaryHierarchyExpander.fetch turns a missing TenantBoundary into an empty
+// jurisdiction and a zero-complaint employee inbox. That is the Task 4 failure
+// mode kept alive in production code for the convenience of tests. server.js
+// sets __shim on every request (makeReq2x), so no live caller is affected; the
+// tests construct one.
 function toV3(req2x) {
   const route = routeOf(req2x);
   if (route === 'boundary') return boundaryToV3(req2x);
   if (route === 'relationship') return relationshipToV3(req2x);
-  // No path at all means a unit test calling the translator directly; the
-  // boundary search is the documented default for that case.
-  if (!req2x || !req2x.__shim) return boundaryToV3(req2x);
   return unknownRoute(req2x);
 }
 
 function toV2(v3Response, req2x) {
   const route = routeOf(req2x);
+  if (route === 'boundary') return boundaryToV2(v3Response, req2x);
   if (route === 'relationship') return relationshipToV2(v3Response, req2x);
-  return boundaryToV2(v3Response, req2x);
+  return unknownRoute(req2x);
 }
 
 module.exports = {

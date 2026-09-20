@@ -20,18 +20,41 @@ function gapLines() {
     .map((l) => JSON.parse(l));
 }
 
-// --- the two cases the brief specifies, verbatim ------------------------
+// Mirrors server.js makeReq2x(): a non-enumerable __shim carrying the inbound
+// 2.x transport context. Every translator call goes through one, because the
+// translator no longer defaults to the boundary search when the route cannot
+// be determined - it throws. The brief's two literal cases below were written
+// against that removed fallback and are restated here with a real __shim.
+function withShim(body, path, query) {
+  const obj = body && typeof body === 'object' ? body : {};
+  Object.defineProperty(obj, '__shim', {
+    value: { method: 'POST', path, query: query || {}, headers: {}, rawBody: '' },
+    enumerable: false,
+    configurable: true,
+  });
+  return obj;
+}
+
+const BOUNDARY_PATH = '/boundary-service/boundary/_search';
+
+// --- the two cases the brief specifies ----------------------------------
 
 test('moves query-string codes onto the v3 GET', () => {
-  const out = boundary.toV3({ __query: { tenantId: 'mz', codes: 'A,B', limit: '10', offset: '0' },
-                              RequestInfo: { userInfo: { uuid: 'u-1', tenantId: 'mz' } } });
+  const out = boundary.toV3(
+    withShim(
+      { __query: { tenantId: 'mz', codes: 'A,B', limit: '10', offset: '0' },
+        RequestInfo: { userInfo: { uuid: 'u-1', tenantId: 'mz' } } },
+      BOUNDARY_PATH,
+      { tenantId: 'mz', codes: 'A,B', limit: '10', offset: '0' }
+    )
+  );
   assert.strictEqual(out.method, 'GET');
   assert.ok(out.path.startsWith('/boundary/v3/boundaries'));
   assert.ok(out.path.includes('codes=A%2CB') || out.path.includes('codes=A,B'));
 });
 
 test('returns a boundary array under the 2.x key', () => {
-  const v2 = boundary.toV2({ boundaries: [{ code: 'A', name: 'A' }] }, {});
+  const v2 = boundary.toV2({ boundaries: [{ code: 'A', name: 'A' }] }, withShim({}, BOUNDARY_PATH, {}));
   assert.strictEqual(v2.boundary.length, 1);
 });
 
@@ -175,7 +198,7 @@ test('a multi-code search is recorded as unmapped, and still passed through', ()
 
 test('a missing tenant is recorded as unmapped rather than defaulted to one', () => {
   const before = gapLines().length;
-  const out = boundary.toV3({ __query: { codes: 'SUN01_LOCALITY' } });
+  const out = boundary.toV3(withShim({ __query: { codes: 'SUN01_LOCALITY' } }, BOUNDARY_PATH, { codes: 'SUN01_LOCALITY' }));
   const added = gapLines().slice(before);
   assert.ok(added.some((e) => e.field === 'tenantId' && e.action === 'unmapped'));
   assert.strictEqual(out.headers['X-Tenant-ID'], '');
@@ -353,4 +376,47 @@ test('an unknown /boundary-service path throws and is gap-logged, never guessed 
   assert.throws(() => boundary.toV3(req), /unsupported 2\.x boundary path/);
   const added = gapLines().slice(before);
   assert.ok(added.some((e) => e.action === 'unmapped' && e.field === '/boundary-service/boundary/_create'));
+});
+
+// --- the removed shape/absence fallback ---------------------------------
+//
+// Tasks 5 and 6 removed the same branch from workflow.js and user.js. This
+// translator had it too, in two places: toV3 defaulted to the boundary search
+// whenever req2x carried no __shim, and toV2 defaulted to it for ANY route it
+// could not name. Both are gone.
+
+test('toV3 with no __shim throws instead of defaulting to the boundary search', () => {
+  assert.throws(() => boundary.toV3({ __query: { tenantId: 'pg', codes: 'SUN01_LOCALITY' } }),
+    /carried no __shim transport context/);
+  assert.throws(() => boundary.toV3(undefined), /carried no __shim transport context/);
+  assert.throws(() => boundary.toV3(null), /carried no __shim transport context/);
+});
+
+test('toV2 with no __shim throws rather than answering a TenantBoundary-less envelope', () => {
+  // This is the exact silent failure: a relationship reply rebuilt as a
+  // boundary envelope has no TenantBoundary key, so BoundaryHierarchyExpander
+  // yields an empty jurisdiction and the employee inbox comes back empty, 200.
+  assert.throws(() => boundary.toV2(LIVE_V3_REL, {}), /carried no __shim transport context/);
+  assert.throws(() => boundary.toV2({ status: 200, json: { boundary: [] } }, {}),
+    /carried no __shim transport context/);
+});
+
+test('toV2 on an unrecognised path throws instead of falling through to boundaryToV2', () => {
+  const req = {};
+  Object.defineProperty(req, '__shim', {
+    value: { method: 'POST', path: '/boundary-service/boundary/_create', query: {}, headers: {}, rawBody: '' },
+    enumerable: false,
+  });
+  assert.throws(() => boundary.toV2({ status: 200, json: {} }, req), /unsupported 2\.x boundary path/);
+});
+
+test('a missing __shim is gap-logged as unmapped, not swallowed', () => {
+  const before = gapLines().length;
+  assert.throws(() => boundary.toV3({}), /carried no __shim/);
+  const added = gapLines().slice(before);
+  const e = added.find((x) => x.field === '(no path: req2x carried no __shim)');
+  assert.ok(e, 'the missing-context case must be gap-logged');
+  assert.strictEqual(e.action, 'unmapped');
+  assert.strictEqual(e.dep, 'boundary-service');
+  assert.match(e.detail, /zero-complaint employee inbox/);
 });
