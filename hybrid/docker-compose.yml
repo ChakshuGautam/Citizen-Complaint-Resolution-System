@@ -1,0 +1,27 @@
+# Run as: docker compose -p hybrid up -d --build
+#
+# Joins BOTH stacks' networks so the shim can resolve d3-kong (v3) and the
+# 2.x service names (pgr-services, egov-mdms-service, ...) by container name.
+services:
+  hybrid-shim:
+    build: .
+    container_name: hybrid-shim
+    restart: unless-stopped
+    ports:
+      - "9100:9100"
+    environment:
+      PORT: "9100"
+      V3_BASE: "http://d3-kong:8000"
+      GAP_LOG: "/gaps/gaps.jsonl"
+    volumes:
+      # /opt/hybrid-shim/gaps.jsonl is a symlink to ./gaps/gaps.jsonl on the host
+      - ./gaps:/gaps
+    networks:
+      - digit_egov-network
+      - digit3_default
+
+networks:
+  digit_egov-network:
+    external: true
+  digit3_default:
+    external: true

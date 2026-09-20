@@ -1,0 +1,217 @@
+# v3-config/pgr-process-definition.yaml
+#
+# CCRS's PGR workflow, expressed as a DIGIT 3.0 process definition.
+#
+# SOURCE OF TRUTH: v3-config/pgr-businessservice-2x.json — the LIVE 2.x
+# BusinessService, exported on 2026-09-20 with
+#   POST http://localhost:18000/egov-workflow-v2/egov-wf/businessservice/_search
+#        ?tenantId=pg&businessServices=PGR
+# Nothing here is guessed. Every state, action, nextState, role and sla below is
+# transcribed from that file. Where 2.x says something v3 has no field for, the
+# fact is recorded in gaps.jsonl by record-workflow-gaps.js — never silently
+# dropped.
+#
+# Register with:  bash /opt/hybrid-shim/register-pgr-workflow.sh
+#
+# ---------------------------------------------------------------------------
+# What this file CANNOT carry across, and why (one gaps.jsonl entry each)
+# ---------------------------------------------------------------------------
+#  * The 2.x start state is NAMELESS ("state": null, isStartState: true). v3
+#    requires every state to have a non-empty `code`, so it is named START here.
+#    START exists only in v3; no CCRS complaint is ever observed in it, because
+#    the same call that creates the instance also runs APPLY.
+#  * isTerminateState has NO v3 representation. The spec offers
+#    TERMINAL_SUCCESS / TERMINAL_FAILURE, and this file sends them — but the
+#    LIVE service silently rewrites every non-INITIAL type to INTERMEDIATE
+#    (verified with a throwaway definition: TERMINAL_SUCCESS in, INTERMEDIATE
+#    back). The values are kept here as the honest intent; they do not survive.
+#  * docUploadRequired and isStateUpdatable have no v3 field at all.
+#  * Action `active` (2.x soft-delete flag) has no v3 field; v3 deletes actions.
+#  * SELF-LOOP ACTIONS DO NOT WORK IN v3. COMMENT (at 5 states) and ESCALATE
+#    (at PENDINGATLME) have nextState == currentState in 2.x. v3 STORES them
+#    happily and then refuses them at runtime with
+#    409 "invalid state transition: no transition". They are kept in this file
+#    so the definition matches 2.x, and are individually gap-logged.
+#  * CANCELLED is unreachable in 2.x too (no action targets it); it is carried
+#    over verbatim so the state list matches.
+#  * `roles` is NOT declared by ActionInput in digit-specs/v3.0.0/workflow.yaml,
+#    but the live service accepts, stores, echoes AND ENFORCES it. It is used.
+# ---------------------------------------------------------------------------
+
+code: PGR                      # 2.x businessService
+name: PGR                      # v3 requires a display name; 2.x has none
+version: "1.0"                 # v3-only concept; 2.x versions by uuid
+sla: 432000000                 # 2.x businessServiceSla, milliseconds
+additionalDetails:
+  # Carried here because v3 has no first-class home for them.
+  business: pgr-services       # 2.x BusinessService.business
+  sourceOfTruth: v3-config/pgr-businessservice-2x.json
+  sourceUuid: 7b38c57c-ce17-43c5-91a8-1ef737a693b6   # 2.x BusinessService.uuid
+
+states:
+  # --- 2.x start state: uuid eaf4ebb3-..., "state": null -------------------
+  - code: START
+    name: Start
+    type: INITIAL
+    description: >-
+      Synthetic code for the 2.x nameless start state (uuid
+      eaf4ebb3-9a8e-4671-a82e-04c2fe73ac83, isStartState=true,
+      isStateUpdatable=true). v3 requires a code.
+    additionalDetails:
+      twoXStateUuid: eaf4ebb3-9a8e-4671-a82e-04c2fe73ac83
+      twoXStateCode: null
+      twoXIsStateUpdatable: true
+      twoXDocUploadRequired: false
+    actions:
+      - code: APPLY
+        label: Apply
+        nextState: PENDINGFORASSIGNMENT
+        roles: [CITIZEN, CSR]
+
+  - code: PENDINGFORASSIGNMENT
+    name: Pending For Assignment
+    type: INTERMEDIATE
+    # 2.x sla: null
+    additionalDetails:
+      twoXStateUuid: c72ac8ac-4ed8-454f-9f1b-8e9baa85c7b3
+      twoXIsStateUpdatable: false
+      twoXDocUploadRequired: false
+    actions:
+      - code: REJECT
+        label: Reject
+        nextState: REJECTED
+        roles: [GRO, PGR_VIEWER]
+      - code: COMMENT            # SELF-LOOP — stored, unusable at runtime
+        label: Comment
+        nextState: PENDINGFORASSIGNMENT
+        roles: [CITIZEN]
+      - code: ASSIGN
+        label: Assign
+        nextState: PENDINGATLME
+        roles: [GRO, PGR_VIEWER]
+
+  - code: PENDINGFORREASSIGNMENT
+    name: Pending For Reassignment
+    type: INTERMEDIATE
+    sla: 300000
+    additionalDetails:
+      twoXStateUuid: 1d486301-4c34-4b19-bf40-da0ebf546bef
+      twoXIsStateUpdatable: false
+      twoXDocUploadRequired: false
+    actions:
+      - code: ASSIGN
+        label: Assign
+        nextState: PENDINGATLME
+        roles: [GRO, PGR_VIEWER]
+      - code: COMMENT            # SELF-LOOP — stored, unusable at runtime
+        label: Comment
+        nextState: PENDINGFORREASSIGNMENT
+        roles: [CITIZEN]
+      - code: REJECT
+        label: Reject
+        nextState: REJECTED
+        roles: [GRO, PGR_VIEWER]
+
+  - code: PENDINGATLME
+    name: Pending At LME
+    type: INTERMEDIATE
+    sla: 300000
+    additionalDetails:
+      twoXStateUuid: 9314d274-34ef-46d9-89e1-a337af700e94
+      twoXIsStateUpdatable: false
+      twoXDocUploadRequired: false
+    actions:
+      - code: COMMENT            # SELF-LOOP — stored, unusable at runtime
+        label: Comment
+        nextState: PENDINGATLME
+        roles: [CITIZEN]
+      - code: REASSIGN
+        label: Reassign
+        nextState: PENDINGFORREASSIGNMENT
+        roles: [GRO, PGR_LME, PGR_VIEWER]
+      - code: ESCALATE           # SELF-LOOP — stored, unusable at runtime
+        label: Escalate
+        nextState: PENDINGATLME
+        roles: [GRO, PGR_LME, PGR_VIEWER, SYSTEM]
+      - code: RESOLVE
+        label: Resolve
+        nextState: RESOLVED
+        roles: [GRO, PGR_LME, PGR_VIEWER]
+
+  - code: REJECTED
+    name: Rejected
+    # 2.x isTerminateState=true. Sent as TERMINAL_FAILURE; the live service
+    # rewrites it to INTERMEDIATE. See the header note.
+    type: TERMINAL_FAILURE
+    sla: 300000
+    additionalDetails:
+      twoXStateUuid: fd16c395-bcaa-4f9c-a452-33e4a3d5acd0
+      twoXIsTerminateState: true
+      twoXIsStateUpdatable: false
+      twoXDocUploadRequired: false
+    actions:
+      - code: RATE
+        label: Rate
+        nextState: CLOSEDAFTERREJECTION
+        roles: [CFC, CITIZEN]
+      - code: REOPEN
+        label: Reopen
+        nextState: PENDINGFORASSIGNMENT
+        roles: [CFC, CITIZEN, CSR, PGR_VIEWER]
+      - code: COMMENT            # SELF-LOOP — stored, unusable at runtime
+        label: Comment
+        nextState: REJECTED
+        roles: [CITIZEN]
+
+  - code: RESOLVED
+    name: Resolved
+    type: TERMINAL_SUCCESS
+    sla: 300000
+    additionalDetails:
+      twoXStateUuid: f4209bfa-9abe-4da9-b80f-3f43fced607c
+      twoXIsTerminateState: true
+      twoXIsStateUpdatable: false
+      twoXDocUploadRequired: false
+    actions:
+      - code: REOPEN
+        label: Reopen
+        nextState: PENDINGFORASSIGNMENT
+        roles: [CFC, CITIZEN, CSR, PGR_VIEWER]
+      - code: COMMENT            # SELF-LOOP — stored, unusable at runtime
+        label: Comment
+        nextState: RESOLVED
+        roles: [CITIZEN]
+      - code: RATE
+        label: Rate
+        nextState: CLOSEDAFTERRESOLUTION
+        roles: [CFC, CITIZEN]
+
+  - code: CLOSEDAFTERREJECTION
+    name: Closed After Rejection
+    type: TERMINAL_FAILURE
+    additionalDetails:
+      twoXIsTerminateState: true
+      twoXIsStateUpdatable: false
+      twoXDocUploadRequired: false
+    actions: []
+
+  - code: CLOSEDAFTERRESOLUTION
+    name: Closed After Resolution
+    type: TERMINAL_SUCCESS
+    additionalDetails:
+      twoXIsTerminateState: true
+      twoXIsStateUpdatable: false
+      twoXDocUploadRequired: false
+    actions: []
+
+  - code: CANCELLED
+    name: Cancelled
+    type: TERMINAL_FAILURE
+    description: >-
+      Present in the live 2.x BusinessService but UNREACHABLE — no action in
+      any state has nextState = CANCELLED. Carried over verbatim.
+    additionalDetails:
+      twoXIsTerminateState: true
+      twoXIsStateUpdatable: false
+      twoXDocUploadRequired: false
+    actions: []
