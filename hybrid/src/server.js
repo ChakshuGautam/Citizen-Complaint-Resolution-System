@@ -13,9 +13,12 @@ const PORT = Number(process.env.PORT || 9100);
 const MAX_BODY_BYTES = Number(process.env.MAX_BODY_BYTES || 10 * 1024 * 1024);
 
 // --- Translator registration -------------------------------------------
-// Tasks 3-6 add one line each, e.g.:
-//   router.register('/egov-idgen', require('./translators/idgen'));
-// Nothing is registered yet, so every path answers 502 SHIM_UNMAPPED.
+// Tasks 3-6 add one line each. Registered so far:
+//   /egov-idgen -> CCRS POSTs {host}egov-idgen/id/_generate (egov.idgen.path).
+// Prefixes are registered WITHOUT a trailing slash: router.normalize() folds
+// the two spellings together, so a trailing slash would silently collide.
+// Any path with no translator still answers 502 SHIM_UNMAPPED.
+router.register('/egov-idgen', require('./translators/idgen'));
 // -----------------------------------------------------------------------
 
 function send(res, status, obj) {
