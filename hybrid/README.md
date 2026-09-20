@@ -29,6 +29,7 @@ cd /opt/hybrid-shim && docker compose -p hybrid up -d --build
 | 2.x dependency | prefix | v3 service | status |
 |---|---|---|---|
 | `egov-idgen` | `/egov-idgen` | `idgen` (`/idgen/v3/*`) | **live** — pgr-services only |
+| `boundary-service` | `/boundary-service` | `boundary` (`/boundary/v3/*`) | **live** — pgr-services only |
 
 ### idgen (Task 3)
 
@@ -123,16 +124,108 @@ bash /opt/hybrid-shim/baseline/compare.sh \
 Both runs: 7/7 PASS, `EQUIVALENT: 7 steps, 731 compared facts`, with
 `compare.sh`'s ignore list **unchanged**.
 
+
+### boundary (Task 4)
+
+**`EGOV_BOUNDARY_HOST` serves TWO endpoints, not one.** Moving the variable
+moves both, so both must be translated or the forgotten one gets the wrong
+envelope:
+
+| 2.x path | CCRS caller | v3 |
+|---|---|---|
+| `/boundary-service/boundary/_search` | `ServiceRequestValidator.validateBoundary` — is this complaint locality real? | `GET /boundary/v3/boundaries` |
+| `/boundary-service/boundary-relationships/_search` | `BoundaryHierarchyExpander.fetch` — which boundary codes may this employee see? | `GET /boundary/v3/relationship` |
+
+`src/translators/boundary.js` dispatches on the sub-path and **throws** on any
+third `/boundary-service/*` path (502 `SHIM_ERROR`) rather than guessing. The
+first switchover attempt did guess — one translator for the whole prefix — and
+the relationship call came back as a boundary envelope, so the employee's
+jurisdiction expanded to the empty set and the final search returned **zero
+complaints with HTTP 200 and no error anywhere**. Field-by-field notes, all
+probed live, are in the header comment of the translator.
+
+Two quirks worth knowing:
+
+- The 2.x boundary search posts a **bare `RequestInfo`** as its body (not
+  `{"RequestInfo":{...}}`) and puts the criteria in the query string, so
+  `context.toHeaders()` yields an empty tenant. The translator builds
+  `X-Tenant-ID` / `X-User-ID` itself, from `?tenantId=` first and the
+  `userInfo` second. The relationship search *does* wrap it; both are handled.
+- `egov.boundary.host` ends in `/` and `egov.boundary.search.url` starts with
+  `/`, so the concatenation has a double slash — but Spring's `RestTemplate`
+  normalises it before the wire (confirmed in boundary-service's own
+  `TracerFilter` log; 2.x actually **500s** on the un-normalised form). The
+  shim therefore sees a single slash and the registered prefix matches.
+
+#### Seeding v3 first — the store starts empty
+
+Nothing migrates 2.x boundary data. `GET /boundary/v3/boundaries` returned
+`{"boundary":[]}` for every `pg` code, so CCRS could not validate a locality
+until the hierarchy and boundaries existed in v3. Seeded with **exactly** this
+script, transcribed from the live CCRS `boundary` / `boundary_relationship`
+tables (`ADMIN`: `PG_STATE` > `PG_CITYA` > `PG_CITYA_Z1` > `PG_CITYA_B1` >
+`SUN01_LOCALITY`, the chain the baseline's `LOCALITY=SUN01_LOCALITY` needs):
+
+```bash
+bash /opt/hybrid-shim/seed-boundaries.sh          # V3=, TENANT= are overridable
+node /opt/hybrid-shim/record-boundary-gaps.js     # idempotent; once per fresh store
+```
+
+Only that chain was seeded. `SUN02_LOCALITY`, `SUN03_LOCALITY` and the whole
+`pg.citya` tenant exist in 2.x and **do not exist in v3** — see the gap log.
+
+#### Switching CCRS over, and back
+
+`EGOV_BOUNDARY_HOST` appears three times in
+`/opt/digit/docker-compose.egov-digit.yaml` — `egov-hrms` (1514, no trailing
+slash), `egov-bndry-mgmnt` (1570) and `pgr-services` (1814). **Only the
+pgr-services one is re-pointed.** Original value:
+`http://boundary-service:8081/` (the trailing slash matters).
+
+`flip_boundary.py` edits that one line and refuses if it cannot find exactly
+one match inside the `pgr-services:` block:
+
+```bash
+python3 /opt/hybrid-shim/flip_boundary.py shim   # -> http://hybrid-shim:9100/
+python3 /opt/hybrid-shim/flip_boundary.py orig   # -> http://boundary-service:8081/  (rollback)
+```
+
+then restart pgr-services with the **full five-file** `-f` list shown under
+idgen above. A pristine copy of the file as it was before Task 4 is kept at
+`/opt/hybrid-shim/docker-compose.egov-digit.yaml.task4-orig`.
+
+> **Always `docker restart digit-pgr-services-1` before measuring a boundary
+> change.** `BoundaryHierarchyExpander` caches each jurisdiction expansion for
+> **30 minutes** (Caffeine `expireAfterWrite`) and falls back silently to the
+> unexpanded code on any failure. `docker compose up -d pgr-services` with no
+> config change leaves the container running and does **not** evict it, so a
+> run made after a fix can still be measuring the state before it. This cost
+> two red lifecycle runs during Task 4.
+
+#### Proof it is really v3 serving the boundaries
+
+pgr-services' own log shows every boundary call going to the shim, and the
+seeded v3 rows carry `createdBy: hybrid-shim-task4` where the 2.x rows carry
+`createdBy: system`:
+
+```bash
+docker logs digit-pgr-services-1 --since 15m 2>&1 \
+  | grep -oE "hybrid-shim:9100/boundary-service/[a-z-]+/_search" | sort | uniq -c
+```
+
+Three consecutive runs: 7/7 PASS, `EQUIVALENT: 7 steps, 731 compared facts`,
+with `compare.sh`'s ignore list **unchanged**.
+
 ---
 
 ## Tests
 
 ```bash
-cd /opt/hybrid-shim && node --test test/      # 15/15, no npm dependencies
+cd /opt/hybrid-shim && node --test test/      # 47/47, no npm dependencies
 ```
 
-`test/idgen.test.js` redirects `GAP_LOG` to a temp dir, so running the suite
-never writes to the real `gaps.jsonl`.
+`test/idgen.test.js` and `test/boundary.test.js` redirect `GAP_LOG` to a temp
+dir, so running the suite never writes to the real `gaps.jsonl`.
 
 ## Gap log
 

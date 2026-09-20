@@ -20,6 +20,10 @@ const MAX_BODY_BYTES = Number(process.env.MAX_BODY_BYTES || 10 * 1024 * 1024);
 // replacing an existing translator.
 // Any path with no translator still answers 502 SHIM_UNMAPPED.
 router.register('/egov-idgen', require('./translators/idgen'));
+//   /boundary-service -> CCRS POSTs
+//     {host}/boundary-service/boundary/_search?limit=&offset=&tenantId=&codes=
+//     with a BARE RequestInfo body and the criteria in the query string.
+router.register('/boundary-service', require('./translators/boundary'));
 // -----------------------------------------------------------------------
 
 function send(res, status, obj) {
@@ -54,14 +58,26 @@ function readBody(req) {
 // property so they never leak into a payload that gets re-serialised.
 function makeReq2x(body, req, pathname) {
   const obj = body && typeof body === 'object' && !Array.isArray(body) ? body : {};
+  // The query string is split off the URL here and never reaches router.resolve,
+  // which still matches on the path alone.
+  const query = Object.fromEntries(new URL(req.url, 'http://shim.local').searchParams);
   Object.defineProperty(obj, '__shim', {
     value: {
       method: req.method,
       path: pathname,
-      query: Object.fromEntries(new URL(req.url, 'http://shim.local').searchParams),
+      query,
       headers: req.headers,
       rawBody: body,
     },
+    enumerable: false,
+    configurable: true,
+  });
+  // Same object, second name. Some 2.x callers (boundary-service) put their
+  // whole search criteria in the query string and post a BARE RequestInfo as
+  // the body, so a translator needs the query as directly as it needs the body.
+  // Non-enumerable, so it never leaks into a re-serialised payload.
+  Object.defineProperty(obj, '__query', {
+    value: query,
     enumerable: false,
     configurable: true,
   });
