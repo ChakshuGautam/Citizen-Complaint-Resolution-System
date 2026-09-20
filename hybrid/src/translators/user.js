@@ -317,23 +317,38 @@ function routeOf(req2x) {
 }
 
 function unknownRoute(req2x) {
-  const path = pathOf(req2x) || '(no path on req2x.__shim)';
+  const path = pathOf(req2x);
+  const hasContext = Boolean(path);
+  const field = hasContext ? String(path) : '(no path: req2x carried no __shim)';
   gaplog.record({
     dep: DEP,
-    field: String(path),
+    field,
     action: 'unmapped',
-    detail:
-      `EGOV_USER_HOST now points at the shim and CCRS called ${path}, which is none of the three ` +
-      `2.x user paths pgr-services is known to issue (${SEARCH_2X}, ${CREATE_2X}, ${UPDATE_2X} - ` +
-      'counted from both service/UserService.java and three days of the egov-user-proxy access ' +
-      'log). Refusing to guess. In particular, if this is /user/_details or /user/oauth/token then ' +
-      'something has re-pointed AUTHENTICATION at the shim, which cannot be served at all: a 2.x ' +
-      'opaque access token has no meaning anywhere in DIGIT 3.0. The shim throws (502 SHIM_ERROR) ' +
-      'so an unhandled sub-path is loud rather than plausibly empty.',
+    detail: hasContext
+      ? `EGOV_USER_HOST now points at the shim and CCRS called ${path}, which is none of the three ` +
+        `2.x user paths pgr-services is known to issue (${SEARCH_2X}, ${CREATE_2X}, ${UPDATE_2X} - ` +
+        'counted from both service/UserService.java and three days of the egov-user-proxy access ' +
+        'log). Refusing to guess. In particular, if this is /user/_details or /user/oauth/token then ' +
+        'something has re-pointed AUTHENTICATION at the shim, which cannot be served at all: a 2.x ' +
+        'opaque access token has no meaning anywhere in DIGIT 3.0. The shim throws (502 SHIM_ERROR) ' +
+        'so an unhandled sub-path is loud rather than plausibly empty.'
+      : 'A request reached the user translator with no __shim transport context, so there is no ' +
+        'inbound path to dispatch on. server.js sets __shim on EVERY request (makeReq2x, ' +
+        'unconditionally) and server.js:145/153 are the ONLY call sites of any translator, so this ' +
+        'cannot happen on a live path - it means the translator was called directly, by a test or ' +
+        'by future code. Refusing to fall back to body-shape guessing: that fallback would have ' +
+        'dispatched an unknown call as a user SEARCH and answered {responseInfo, user: []}, which ' +
+        'CCRS reads as the meaningful answer "no such person" and acts on - INVALID_ACCOUNTID on a ' +
+        'create, a null citizen on a search. That is exactly the Task 4 failure mode (a plausible ' +
+        'empty 200), kept alive in production code for the convenience of tests. Throwing instead.',
   });
   const err = new Error(
-    `user translator: unsupported 2.x user path ${path} ` +
-      `(expected ${SEARCH_2X}, ${CREATE_2X} or ${UPDATE_2X})`
+    hasContext
+      ? `user translator: unsupported 2.x user path ${path} ` +
+        `(expected ${SEARCH_2X}, ${CREATE_2X} or ${UPDATE_2X})`
+      : 'user translator: req2x carried no __shim transport context, so the inbound 2.x path is ' +
+        'unknown and no route can be chosen. server.js always sets it; a direct caller must supply ' +
+        `{__shim:{path}} naming one of ${SEARCH_2X}, ${CREATE_2X} or ${UPDATE_2X}.`
   );
   err.shimUnmapped = true;
   throw err;
@@ -986,20 +1001,29 @@ function errorEnvelope(v3Response, req2x, which) {
 
 // ---------------------------------------------------------------- dispatch
 
+// There is NO body-shape fallback, matching workflow.js. An earlier version
+// dispatched on the body when no path was present ("a `user` object means a
+// create, otherwise a search"), so that a unit test could call the translator
+// directly - and the cost of that affordance was that an unrecognised call
+// would have been served as a user SEARCH and answered {responseInfo,
+// user: []}. An empty user list is not a neutral result here: it is the
+// MEANINGFUL answer "no such person", and CCRS acts on it (INVALID_ACCOUNTID,
+// or a silently null citizen). That is the Task 4 failure mode - a plausible
+// empty 200 - kept alive in production code for the convenience of tests.
+//
+// It is safe to remove: server.js sets __shim unconditionally in makeReq2x and
+// server.js:145/153 are the only call sites of any translator, so no live
+// caller can arrive without it (and the gap log records no such arrival). The
+// tests construct a __shim of their own.
+//
+// `hint` is NOT that fallback and stays: it carries a real inbound path as a
+// second argument, which is how the task brief's own contract tests call this.
 function toV3(req2x, hint) {
   const target = withHint(req2x, hint);
   const route = routeOf(target);
   if (route === 'search') return searchToV3(target);
   if (route === 'create') return createToV3(target);
   if (route === 'update') return updateToV3(target);
-  // No path at all means a unit test calling the translator directly. Dispatch
-  // on the body shape: CreateUserRequest has a `user` object, UserSearchRequest
-  // does not.
-  if (!pathOf(target)) {
-    return target && typeof target.user === 'object' && target.user
-      ? createToV3(target)
-      : searchToV3(target);
-  }
   return unknownRoute(target);
 }
 
@@ -1008,11 +1032,6 @@ function toV2(v3Response, req2x) {
   if (route === 'search') return searchToV2(v3Response, req2x);
   if (route === 'create') return createToV2(v3Response, req2x);
   if (route === 'update') return updateToV3(req2x); // always throws
-  if (!pathOf(req2x)) {
-    return req2x && typeof req2x.user === 'object' && req2x.user
-      ? createToV2(v3Response, req2x)
-      : searchToV2(v3Response, req2x);
-  }
   return unknownRoute(req2x);
 }
 

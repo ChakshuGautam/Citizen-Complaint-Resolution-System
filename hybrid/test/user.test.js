@@ -11,6 +11,24 @@ const user = require('../src/translators/user');
 const fs = require('node:fs');
 
 // Reads only the lines a single call appended, so one test cannot see another's.
+// Mirrors server.js makeReq2x(): a non-enumerable __shim carrying the inbound
+// transport context. The translator has no body-shape fallback (by design -
+// it would answer a plausible empty user list), so every test that exercises a
+// route supplies this exactly as the server would.
+function withShim(obj, path, query) {
+  Object.defineProperty(obj, '__shim', {
+    value: { method: 'POST', path, query: query || {}, headers: {}, rawBody: '' },
+    enumerable: false,
+    configurable: true,
+  });
+  Object.defineProperty(obj, '__query', {
+    value: query || {},
+    enumerable: false,
+    configurable: true,
+  });
+  return obj;
+}
+
 function readGapLog(fn) {
   const file = process.env.GAP_LOG;
   const before = fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split('\n').length : 1;
@@ -44,9 +62,12 @@ test('rebuilds the 2.x user envelope', () => {
 
 const SEARCH = { path: '/user/_search' };
 function searchReq(extra) {
-  return Object.assign(
-    { RequestInfo: { apiId: 'Rainmaker', userInfo: { uuid: 'caller-1', tenantId: 'pg' } }, tenantId: 'pg' },
-    extra
+  return withShim(
+    Object.assign(
+      { RequestInfo: { apiId: 'Rainmaker', userInfo: { uuid: 'caller-1', tenantId: 'pg' } }, tenantId: 'pg' },
+      extra
+    ),
+    '/user/_search'
   );
 }
 
@@ -221,14 +242,14 @@ test('a v3 error becomes a 2.x Errors envelope, NOT an empty user list', () => {
 
 const CREATE = { path: '/user/users/_createnovalidate' };
 function createReq(u) {
-  return {
+  return withShim({
     requestInfo: { apiId: 'Rainmaker', userInfo: { uuid: 'caller-1', tenantId: 'pg' } },
     user: Object.assign(
       { userName: '9999009999', name: 'Ada Lovelace', type: 'CITIZEN', mobileNumber: '9999009999',
         tenantId: 'pg', active: true, roles: [{ code: 'CITIZEN', name: 'Citizen', tenantId: 'pg' }] },
       u
     ),
-  };
+  }, '/user/users/_createnovalidate');
 }
 
 test('a 2.x user create becomes POST /individual/v3/individuals', () => {
@@ -272,10 +293,18 @@ test('a created individual comes back as a CCRS User carrying the roles the call
 // ---------------------------------------------------------------------------
 
 test('_updatenovalidate THROWS: v3 PUT needs a `version` the 2.x payload cannot supply', () => {
-  assert.throws(
-    () => user.toV3(createReq({ uuid: 'i-1' }), { path: '/user/users/_updatenovalidate' }),
-    /requires the record `version`/
+  // Built with its OWN __shim: createReq() now pins the create path, and there
+  // is no body-shape fallback to fall back to, so the route has to be stated.
+  const updateReq = withShim(
+    {
+      requestInfo: { apiId: 'Rainmaker', userInfo: { uuid: 'caller-1', tenantId: 'pg' } },
+      user: { uuid: 'i-1', name: 'Ada Lovelace', mobileNumber: '9999009999', tenantId: 'pg' },
+    },
+    '/user/users/_updatenovalidate'
   );
+  assert.throws(() => user.toV3(updateReq), /requires the record `version`/);
+  // and through toV2 as well, which routes to the same refusal
+  assert.throws(() => user.toV2({ status: 200, json: {} }, updateReq), /requires the record `version`/);
 });
 
 test('a fourth user path THROWS rather than returning a plausible empty result', () => {
@@ -296,4 +325,46 @@ test('a fourth user path THROWS rather than returning a plausible empty result',
 test('the translator dispatches on the sub-path regardless of leading slashes', () => {
   const out = user.toV3(searchReq({ uuid: ['a'] }), { path: '//user/_search' });
   assert.ok(out.path.includes('/individual/v3/individuals'));
+});
+
+// ---------------------------------------------------------------------------
+// no transport context -> throw, never guess from the body shape
+// (matches workflow.js after its own fix round; the fallback that used to live
+// here would have answered an unrecognised call with {responseInfo, user: []})
+// ---------------------------------------------------------------------------
+
+test('toV3 with no __shim throws instead of being guessed from its body shape', () => {
+  // A CreateUserRequest-shaped body: the old fallback would have called createToV3.
+  assert.throws(
+    () => user.toV3({ requestInfo: {}, user: { name: 'Ada', mobileNumber: '1' } }),
+    /carried no __shim transport context/
+  );
+  // A UserSearchRequest-shaped body: the old fallback would have called searchToV3.
+  assert.throws(
+    () => user.toV3({ RequestInfo: {}, tenantId: 'pg', uuid: ['a'] }),
+    /carried no __shim transport context/
+  );
+});
+
+test('toV2 with no __shim throws rather than answering a plausible empty user list', () => {
+  assert.throws(
+    () => user.toV2({ status: 200, json: { totalCount: 0, individuals: [] } }, { RequestInfo: {}, tenantId: 'pg' }),
+    /carried no __shim transport context/
+  );
+});
+
+test('undefined and null are rejected the same way', () => {
+  assert.throws(() => user.toV3(undefined), /carried no __shim transport context/);
+  assert.throws(() => user.toV3(null), /carried no __shim transport context/);
+});
+
+test('a missing __shim is gap-logged as unmapped, not swallowed', () => {
+  const log = readGapLog(() => {
+    try { user.toV3({ RequestInfo: {}, uuid: ['a'] }); } catch { /* expected */ }
+  });
+  assert.strictEqual(log.length, 1);
+  assert.strictEqual(log[0].action, 'unmapped');
+  assert.strictEqual(log[0].field, '(no path: req2x carried no __shim)');
+  assert.match(log[0].detail, /server\.js sets __shim on EVERY request/);
+  assert.match(log[0].detail, /Task 4 failure mode/);
 });

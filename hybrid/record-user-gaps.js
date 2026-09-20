@@ -194,6 +194,29 @@ const entries = [
       'nobody has written.',
   },
   {
+    field: 'ComplaintDomainEventService.getAssigneeName -> "NA"',
+    action: 'dropped',
+    detail:
+      'USER-FACING CONSEQUENCE, stated separately because it will not look like a migration bug ' +
+      'when it shows up. Once EGOV_USER_HOST points at v3, EVERY complaint domain event will name ' +
+      'its assignee as the literal string "NA". The chain: ' +
+      'ComplaintDomainEventService.getAssigneeName:226 resolves the assignee by calling ' +
+      'UserService.getFirstRoleNameByUuid:228 on service.auditDetails.lastModifiedBy; that reads ' +
+      'roles[0].getName() off the user-service reply (:241); the v3 individual registry has no ' +
+      'roles field at all, so the shim answers roles: [] rather than inventing one; ' +
+      'getFirstRoleNameByUuid returns null for an empty list and getAssigneeName falls back to ' +
+      '"NA" (:238). Nothing errors, nothing is logged, nothing fails a test - the events are ' +
+      'simply all labelled "NA". Note the field is misleadingly named: it holds a ROLE name (e.g. ' +
+      '"Grievance Routing Officer"), not a person, so what is lost is the assignee role shown on ' +
+      'notifications and any downstream consumer of the event. ' +
+      'This is the whole observable blast radius of v3 carrying no roles - it is NOT a privilege ' +
+      'path (see the User.roles[]/User.type entry) - but it is the kind of thing that surfaces ' +
+      'six months into a migration as "why do all our notifications say NA". ' +
+      'Fixing it needs the same thing everything else in this dependency needs: roles resolved ' +
+      'from Keycloak realm roles for the individual, which is a second call to a second service ' +
+      'with its own credentials.',
+  },
+  {
     field: 'User.id',
     action: 'dropped',
     detail:
