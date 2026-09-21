@@ -61,6 +61,14 @@ public class PolicyDrivenScopeResolver {
     private final MDMSUtils mdmsUtils;
     private final BoundaryHierarchyExpander boundaryHierarchyExpander;
 
+    /**
+     * Field-injected rather than constructor-injected on purpose: this resolver is constructed
+     * directly by 30 test methods that exercise the 2.x branch, which never touches it. A null
+     * here is exactly what an egov.hrms.api.version=2.x deployment behaves like.
+     */
+    @Autowired(required = false)
+    private org.egov.pgr.identity.EmployeeV3Client employeeV3Client;
+
     @Autowired
     public PolicyDrivenScopeResolver(PGRConfiguration config, RestTemplate restTemplate, ObjectMapper mapper,
                                       Principals principals, MDMSUtils mdmsUtils,
@@ -268,6 +276,13 @@ public class PolicyDrivenScopeResolver {
      * JSON array node (or null). Uses the internal gateway host from egov.hrms.host.
      */
     private JsonNode searchHrmsByCode(RequestInfo requestInfo, String tenantId, String userName) {
+        if (config.isHrmsV3())
+            // v3 accepts ?code= and IGNORES it, answering with every employee in the tenant at
+            // HTTP 200 - which here would resolve a scope from the wrong person's department and
+            // jurisdictions. The client reads the list and applies the code filter itself.
+            return employeeV3Client.searchByCodes(java.util.Collections.singletonList(userName),
+                    tenantId, requestInfo).get("Employees");
+
         // Built via UriComponentsBuilder (query params encoded), not raw string concatenation: an
         // HRMS-linked username containing '&', '=', '%', or '#' (plausible for email-based/SSO
         // usernames) would otherwise corrupt the query string and resolve the wrong employee — the

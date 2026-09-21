@@ -724,10 +724,11 @@ public class NotificationService {
         String departmentFromMDMS;
 
         String localisationMessageForPlaceholder =  notificationUtil.getLocalizationMessages(request.getService().getTenantId(), request.getRequestInfo(),COMMON_MODULE);
-        //HRSMS CALL
-        StringBuilder url = hrmsUtils.getHRMSURI(request.getWorkflow().getAssignes(),request.getService().getTenantId());
-        RequestInfoWrapper requestInfoWrapper = RequestInfoWrapper.builder().requestInfo(request.getRequestInfo()).build();
-        Object response = serviceRequestRepository.fetchResult(url, requestInfoWrapper);
+        //HRSMS CALL - on v3 this is d3-employee, answered in the 2.x shape so the JsonPaths below
+        //are unchanged. Note user.name comes back null unless the v3 employee carries an
+        //individualId, so {emp_name} can legitimately be blank on DIGIT 3.0.
+        Object response = hrmsUtils.fetchEmployees(request.getWorkflow().getAssignes(),
+                request.getRequestInfo(), request.getService().getTenantId());
 
         //MDMS CALL
         Object mdmsData = mdmsUtils.mDMSCall(request);

@@ -6,6 +6,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.egov.common.contract.request.RequestInfo;
 import org.egov.pgr.config.PGRConfiguration;
+import org.egov.pgr.identity.EmployeeV3Client;
 import org.egov.pgr.repository.ServiceRequestRepository;
 import org.egov.pgr.web.models.RequestInfoWrapper;
 import org.egov.tracer.model.CustomException;
@@ -15,6 +16,7 @@ import org.springframework.util.CollectionUtils;
 
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 import static org.egov.pgr.util.PGRConstants.HRMS_DEPARTMENT_JSONPATH;
 import static org.egov.pgr.util.PGRConstants.HRMS_REPORTING_TO_JSONPATH;
@@ -28,11 +30,40 @@ public class HRMSUtil {
 
     private PGRConfiguration config;
 
+    private EmployeeV3Client employeeV3Client;
+
 
     @Autowired
-    public HRMSUtil(ServiceRequestRepository serviceRequestRepository, PGRConfiguration config) {
+    public HRMSUtil(ServiceRequestRepository serviceRequestRepository, PGRConfiguration config,
+                    EmployeeV3Client employeeV3Client) {
         this.serviceRequestRepository = serviceRequestRepository;
         this.config = config;
+        this.employeeV3Client = employeeV3Client;
+    }
+
+    /**
+     * The employee payload for a set of 2.x uuids, in the 2.x HRMS shape on both stacks.
+     *
+     * <p>Every caller of this data reads it through a JsonPath over
+     * {@code $.Employees[*].assignments[*]}, so the v3 client answers in that same shape rather
+     * than each caller growing a second parser. What v3 cannot supply is inside that shape and
+     * documented there: a synthesised one-element assignments list, a null reportingTo and,
+     * usually, a null name.
+     */
+    public Object fetchEmployees(List<String> uuids, RequestInfo requestInfo, String tenantId) {
+        if (config.isHrmsV3())
+            // Converted to Map/List and NOT returned as a JsonNode. Every consumer of this value
+            // reads it with JsonPath, whose default provider walks Maps and Lists and cannot see
+            // inside a Jackson node at all - a JsonNode here is a PARSING_ERROR on the first
+            // employee lookup, which is precisely the kind of "it compiles, the flag flips, the
+            // assignment validator starts failing" difference this migration keeps producing.
+            // 2.x returns a LinkedHashMap from fetchResult; so does this.
+            return new ObjectMapper().convertValue(
+                    employeeV3Client.searchByLegacyUuids(uuids, tenantId, requestInfo), Map.class);
+
+        StringBuilder url = getHRMSURI(uuids, tenantId);
+        RequestInfoWrapper requestInfoWrapper = RequestInfoWrapper.builder().requestInfo(requestInfo).build();
+        return serviceRequestRepository.fetchResult(url, requestInfoWrapper);
     }
 
     /**
@@ -43,11 +74,7 @@ public class HRMSUtil {
      */
     public List<String> getDepartment(List<String> uuids, RequestInfo requestInfo,String tenantId){
 
-        StringBuilder url = getHRMSURI(uuids,tenantId);
-
-        RequestInfoWrapper requestInfoWrapper = RequestInfoWrapper.builder().requestInfo(requestInfo).build();
-
-        Object res = serviceRequestRepository.fetchResult(url, requestInfoWrapper);
+        Object res = fetchEmployees(uuids, requestInfo, tenantId);
 
         List<String> departments = null;
 
@@ -72,11 +99,7 @@ public class HRMSUtil {
      */
     public String getSupervisorUuid(String employeeUuid, RequestInfo requestInfo, String tenantId) {
 
-        StringBuilder url = getHRMSURI(Collections.singletonList(employeeUuid), tenantId);
-
-        RequestInfoWrapper requestInfoWrapper = RequestInfoWrapper.builder().requestInfo(requestInfo).build();
-
-        Object res = serviceRequestRepository.fetchResult(url, requestInfoWrapper);
+        Object res = fetchEmployees(Collections.singletonList(employeeUuid), requestInfo, tenantId);
 
         if (res == null) {
             log.warn("HRMS returned null for employee UUID: {}", employeeUuid);

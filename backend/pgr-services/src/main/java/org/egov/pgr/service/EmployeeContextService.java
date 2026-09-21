@@ -51,6 +51,10 @@ public class EmployeeContextService {
     private final Set<String> citizenRoleCodes;
     private final Set<String> adminRoleCodes;
 
+    /** See the note on PolicyDrivenScopeResolver: null is the 2.x deployment's behaviour. */
+    @Autowired(required = false)
+    private org.egov.pgr.identity.EmployeeV3Client employeeV3Client;
+
     @Autowired
     public EmployeeContextService(PGRConfiguration config, RestTemplate restTemplate) {
         this.config = config;
@@ -96,6 +100,16 @@ public class EmployeeContextService {
     }
 
     private JsonNode searchEmployee(RequestInfo requestInfo, String tenantId, String uuid) {
+        if (config.isHrmsV3()) {
+            // v3 accepts ?uuids= / ?userId= and applies neither, so the client resolves the uuid
+            // through the identity map (one by-id call) or a filtered tenant sweep, and answers in
+            // the 2.x Employees shape this method's callers already read.
+            JsonNode employees = employeeV3Client
+                    .searchByLegacyUuids(java.util.Collections.singletonList(uuid), tenantId, requestInfo)
+                    .path("Employees");
+            return employees.isArray() && !employees.isEmpty() ? employees.get(0) : null;
+        }
+
         String url = UriComponentsBuilder
                 .fromHttpUrl(config.getHrmsHost() + config.getHrmsEndPoint())
                 .queryParam("tenantId", tenantId)

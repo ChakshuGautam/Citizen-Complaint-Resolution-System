@@ -572,6 +572,19 @@ public class PGRConfiguration {
     @Value("${egov.hrms.v3.jurisdiction.search.endpoint:/employee/v3/jurisdictions}")
     private String hrmsV3JurisdictionSearchEndpoint;
 
+    /**
+     * How many employees CCRS will read from a tenant in one sweep before refusing.
+     *
+     * <p>The v3 employee list endpoint accepts ?id=, ?code= and ?userId= and applies NONE of them -
+     * each returns every employee in the tenant at HTTP 200 (measured). Only ?isActive= filters.
+     * So CCRS applies those filters itself, client-side, over the whole list, and the list is
+     * UNPAGED: there is no size, no page and no totalCount on that endpoint. This cap is the
+     * bound that stops a large tenant turning a single employee lookup into an unbounded read,
+     * and going over it is a loud refusal rather than a truncated answer about the wrong people.
+     */
+    @Value("${egov.hrms.v3.max.employees:5000}")
+    private Integer hrmsV3MaxEmployees;
+
     @Value("${egov.url.shortner.v3.host:${egov.url.shortner.host}}")
     private String urlShortnerV3Host;
 

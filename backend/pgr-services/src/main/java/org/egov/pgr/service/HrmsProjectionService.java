@@ -34,6 +34,7 @@ public class HrmsProjectionService {
     private final ServiceRequestRepository serviceRequestRepository;
     private final PGRConfiguration config;
     private final ObjectMapper mapper;
+    private final org.egov.pgr.identity.EmployeeV3Client employeeV3Client;
 
     @Value("${egov.state.level.tenant.id:ke}")
     private String stateLevelTenantId;
@@ -43,11 +44,13 @@ public class HrmsProjectionService {
 
     public HrmsProjectionService(HrmsProjectionRepository projectionRepository,
                                  ServiceRequestRepository serviceRequestRepository,
-                                 PGRConfiguration config, ObjectMapper mapper) {
+                                 PGRConfiguration config, ObjectMapper mapper,
+                                 org.egov.pgr.identity.EmployeeV3Client employeeV3Client) {
         this.projectionRepository = projectionRepository;
         this.serviceRequestRepository = serviceRequestRepository;
         this.config = config;
         this.mapper = mapper;
+        this.employeeV3Client = employeeV3Client;
     }
 
     /** Upsert one HRMS employee node (same shape in topics and _search). */
@@ -108,6 +111,10 @@ public class HrmsProjectionService {
      * matches city rows). Paged via limit/offset until a short page.
      */
     public synchronized void rebuildProjection() {
+        if (config.isHrmsV3()) {
+            rebuildProjectionFromV3();
+            return;
+        }
         RequestInfoWrapper wrapper = RequestInfoWrapper.builder().requestInfo(systemRequestInfo()).build();
         int offset = 0;
         int total = 0;
@@ -136,6 +143,34 @@ public class HrmsProjectionService {
             log.info("HRMS projection rebuild complete: {} employees projected for tenant {}", total, stateLevelTenantId);
         } catch (Exception e) {
             log.error("HRMS projection rebuild failed after {} rows (tenant {})", total, stateLevelTenantId, e);
+        }
+    }
+
+    /**
+     * The same sweep against d3-employee, which is unpaged and answers with every employee of the
+     * tenant in one bare array - so there is no limit/offset loop to run and the client's own cap
+     * is what bounds it.
+     *
+     * <p>The projection's {@code reporting_to} column comes back NULL from this source on every
+     * row, because v3 has no supervisor edge anywhere. That is not a gap this method can close,
+     * and it must not be papered over here: {@code VisibilityService} reads the same column and
+     * treats "no projected reportees" as "show the whole tenant". The escalation commit owns that.
+     */
+    private void rebuildProjectionFromV3() {
+        int total = 0;
+        try {
+            JsonNode employees = employeeV3Client
+                    .searchAll(stateLevelTenantId, systemRequestInfo())
+                    .path("Employees");
+            for (JsonNode employee : employees) {
+                projectEmployee(employee);
+                total++;
+            }
+            log.info("HRMS projection rebuild complete from DIGIT 3.0: {} employees projected for tenant {}",
+                    total, stateLevelTenantId);
+        } catch (Exception e) {
+            log.error("HRMS projection rebuild from DIGIT 3.0 failed after {} rows (tenant {})",
+                    total, stateLevelTenantId, e);
         }
     }
 
