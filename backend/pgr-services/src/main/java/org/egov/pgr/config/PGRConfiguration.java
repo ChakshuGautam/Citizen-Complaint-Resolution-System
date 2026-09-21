@@ -536,6 +536,27 @@ public class PGRConfiguration {
     @Value("${egov.user.v3.individual.path:/individual/v3/individuals}")
     private String userV3IndividualPath;
 
+    /**
+     * The gender CCRS sends when it creates an individual - DELIBERATELY BLANK by default.
+     *
+     * <p>v3 requires gender on create and accepts exactly MALE, FEMALE or OTHER (measured; there is
+     * no "not disclosed" value), and CCRS's User model has no gender field at all, so there is
+     * nothing true to send. Blank therefore means "refuse the create and say why" rather than
+     * "invent a fact about a person". Setting it is an explicit, recorded operator decision - for
+     * instance after relaxing the requirement per tenant via POST /individual/v3/configs (W2), or
+     * after deciding that OTHER means "not recorded" for this deployment.
+     */
+    @Value("${egov.user.v3.individual.default.gender:}")
+    private String userV3IndividualDefaultGender;
+
+    /**
+     * How many times an individual update re-reads the record and retries after a
+     * 409 ROW_VERSION_MISMATCH. v3's PUT is optimistic-concurrency; one retry covers a concurrent
+     * writer, and an unbounded one would just lose to it forever.
+     */
+    @Value("${egov.user.v3.individual.update.retries:1}")
+    private Integer userV3IndividualUpdateRetries;
+
     @Value("${egov.localization.v3.host:${egov.localization.host}}")
     private String localizationV3Host;
 

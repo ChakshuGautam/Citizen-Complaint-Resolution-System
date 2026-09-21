@@ -144,12 +144,47 @@ class UserUtilsV3DispatchTest {
     }
 
     @Test
-    @DisplayName("v3: a create/update is refused until it is wired, rather than writing half a person")
-    void v3WriteIsRefusedForNow() {
+    @DisplayName("v3: the CREATE endpoint in the uri dispatches to the individual create")
+    void v3CreateDispatch() {
         config.setUserApiVersion(PGRConfiguration.API_VERSION_V3);
+        User citizen = User.builder().name("Asha Kiptoo").mobileNumber("9000000000").tenantId("ke").build();
+        when(individualV3Client.create(eq(citizen), eq("ke"), any()))
+                .thenReturn(User.builder().uuid("minted-2x-uuid").build());
+
+        UserDetailResponse response = userUtils.userCall(new CreateUserRequest(new RequestInfo(), citizen),
+                new StringBuilder("http://user:8081/user/users/_createnovalidate"));
+
+        assertEquals("minted-2x-uuid", response.getUser().get(0).getUuid());
+        verify(individualV3Client).create(eq(citizen), eq("ke"), any());
+        verify(serviceRequestRepository, never()).fetchResult(any(), any());
+    }
+
+    @Test
+    @DisplayName("v3: the UPDATE endpoint in the uri dispatches to the read-then-write path")
+    void v3UpdateDispatch() {
+        config.setUserApiVersion(PGRConfiguration.API_VERSION_V3);
+        User citizen = User.builder().uuid("legacy-uuid").name("Asha Kiptoo").tenantId("ke").build();
+        when(individualV3Client.update(eq(citizen), eq("ke"), any())).thenReturn(citizen);
+
+        userUtils.userCall(new CreateUserRequest(new RequestInfo(), citizen),
+                new StringBuilder("http://user:8081/user/users/_updatenovalidate"));
+
+        verify(individualV3Client).update(eq(citizen), eq("ke"), any());
+        verify(individualV3Client, never()).create(any(), anyString(), any());
+    }
+
+    @Test
+    @DisplayName("2.x: a create is still the POST it has always been")
+    void twoXCreateIsUnchanged() {
+        config.setUserApiVersion(PGRConfiguration.API_VERSION_2X);
+        LinkedHashMap<String, Object> response = new LinkedHashMap<>();
+        response.put("user", Collections.emptyList());
+        when(serviceRequestRepository.fetchResult(any(), any())).thenReturn(response);
+
         CreateUserRequest request = new CreateUserRequest(new RequestInfo(), User.builder().name("Asha").build());
-        CustomException e = assertThrows(CustomException.class,
-                () -> userUtils.userCall(request, new StringBuilder("http://user:8081/user/users/_createnovalidate")));
-        assertEquals("USER_WRITE_UNSUPPORTED_ON_V3", e.getCode());
+        userUtils.userCall(request, new StringBuilder("http://user:8081/user/users/_createnovalidate"));
+
+        verify(serviceRequestRepository).fetchResult(any(), eq(request));
+        verify(individualV3Client, never()).create(any(), anyString(), any());
     }
 }

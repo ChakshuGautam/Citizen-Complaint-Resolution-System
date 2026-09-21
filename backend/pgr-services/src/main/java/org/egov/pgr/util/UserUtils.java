@@ -98,13 +98,24 @@ public class UserUtils {
         if (userRequest instanceof UserSearchRequest)
             return individualSearch((UserSearchRequest) userRequest);
 
-        if (userRequest instanceof CreateUserRequest)
-            throw new CustomException("USER_WRITE_UNSUPPORTED_ON_V3",
-                    "Creating or updating a person in the DIGIT 3.0 individual registry is not wired yet. "
-                            + "It is not a re-point: create rejects userName, type and roles as unknown fields and "
-                            + "demands a gender CCRS's user model does not have, and update is optimistic-"
-                            + "concurrency - a PUT with no record version is 409 ROW_VERSION_MISMATCH, so it needs "
-                            + "a read first. Refusing rather than writing half a person.");
+        if (userRequest instanceof CreateUserRequest) {
+            CreateUserRequest writeRequest = (CreateUserRequest) userRequest;
+            User subject = writeRequest.getUser();
+            RequestInfo requestInfo = writeRequest.getRequestInfo();
+            String tenantId = subject == null ? null : subject.getTenantId();
+
+            // The 2.x endpoints are _createnovalidate and _updatenovalidate and the caller picks
+            // one by building a different URI; the object it posts is identical. v3 splits them by
+            // verb and path instead, so the uri is still what decides - but the decision is made
+            // here, once, rather than at each of the three call sites.
+            boolean isUpdate = config.getUserUpdateEndpoint() != null
+                    && uri.toString().contains(config.getUserUpdateEndpoint());
+
+            User result = isUpdate
+                    ? individualV3Client.update(subject, tenantId, requestInfo)
+                    : individualV3Client.create(subject, tenantId, requestInfo);
+            return new UserDetailResponse(null, java.util.Collections.singletonList(result));
+        }
 
         throw new CustomException("USER_REQUEST_UNSUPPORTED_ON_V3",
                 "Unrecognised user request of type " + userRequest.getClass().getName() + " for " + uri);
