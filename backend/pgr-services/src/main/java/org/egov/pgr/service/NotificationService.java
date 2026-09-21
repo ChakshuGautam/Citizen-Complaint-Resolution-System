@@ -531,7 +531,8 @@ public class NotificationService {
                 .atZone(ZoneId.systemDefault()).toLocalDate();
         DateTimeFormatter formatter = DateTimeFormatter.ofPattern(DATE_PATTERN);
 
-        String appLink = notificationUtil.getShortnerURL(config.getMobileDownloadLink());
+        String appLink = notificationUtil.getShortnerURL(config.getMobileDownloadLink(),
+                request.getService().getTenantId(), request.getRequestInfo());
 
         if(messageForCitizen != null) {
             messageForCitizen = messageForCitizen.replace("{complaint_type}", localisedComplaint);
@@ -1208,7 +1209,7 @@ public class NotificationService {
         // abort the base placeholders above — otherwise recipients get a message with literal
         // {date}/{additional_comments} braces. Blank (not literal) when the shortener is unavailable.
         try {
-            put(v, "download_link", notificationUtil.getShortnerURL(config.getMobileDownloadLink()));
+            put(v, "download_link", notificationUtil.getShortnerURL(config.getMobileDownloadLink(), tenantId, ri));
         } catch (Exception e) {
             v.put("download_link", "");
             log.warn("url-shortening unavailable; blanked {download_link} for {}: {}",

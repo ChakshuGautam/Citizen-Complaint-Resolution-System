@@ -84,7 +84,7 @@ public class NotificationRolePoolResolutionTest {
         when(templateRenderer.render(anyString(), anyString(), anyString(), anyString(),
                 anyString(), anyString(), any())).thenReturn("BODY-SMS");
         when(notificationUtil.getLocalizationMessages(anyString(), any(), anyString())).thenReturn("{}");
-        when(notificationUtil.getShortnerURL(anyString())).thenReturn("http://short/x");
+        when(notificationUtil.getShortnerURL(anyString(), any(), any())).thenReturn("http://short/x");
     }
 
     private ServiceRequest assignRequest() {

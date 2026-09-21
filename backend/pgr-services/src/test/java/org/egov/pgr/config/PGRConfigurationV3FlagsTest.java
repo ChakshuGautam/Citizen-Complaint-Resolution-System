@@ -28,7 +28,8 @@ class PGRConfigurationV3FlagsTest {
             "egov.workflow.api.version",
             "egov.user.api.version",
             "egov.localization.api.version",
-            "egov.hrms.api.version");
+            "egov.hrms.api.version",
+            "egov.url.shortner.api.version");
 
     @Test
     void anUnsetFlagIsNotV3() {
@@ -40,6 +41,7 @@ class PGRConfigurationV3FlagsTest {
         assertFalse(config.isUserV3());
         assertFalse(config.isLocalizationV3());
         assertFalse(config.isHrmsV3());
+        assertFalse(config.isUrlShortnerV3());
     }
 
     @Test
@@ -90,6 +92,7 @@ class PGRConfigurationV3FlagsTest {
         assertEquals("/individual/v3/individuals", properties.getProperty("egov.user.v3.individual.path"));
         assertEquals("/localization/v3/messages", properties.getProperty("egov.localization.v3.search.endpoint"));
         assertEquals("/employee/v3/employees", properties.getProperty("egov.hrms.v3.employee.search.endpoint"));
+        assertEquals("/url-shortener/v3/short-url", properties.getProperty("egov.url.shortner.v3.short.url.endpoint"));
         assertEquals("100", properties.getProperty("egov.v3.page.max.size"));
     }
 }

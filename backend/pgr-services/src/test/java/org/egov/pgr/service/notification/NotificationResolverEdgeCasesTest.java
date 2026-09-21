@@ -102,7 +102,7 @@ public class NotificationResolverEdgeCasesTest {
 
         // Placeholder enrichment helpers (best-effort, all in try/catch in the service).
         when(notificationUtil.getLocalizationMessages(anyString(), any(), anyString())).thenReturn("{}");
-        when(notificationUtil.getShortnerURL(anyString())).thenReturn("http://short/x");
+        when(notificationUtil.getShortnerURL(anyString(), any(), any())).thenReturn("http://short/x");
     }
 
     // ----------------------------------------------------------------------------------------------

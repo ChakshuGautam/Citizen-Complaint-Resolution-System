@@ -96,7 +96,7 @@ public class NotificationConfigDrivenEmissionTest {
 
         // Placeholder enrichment helpers (best-effort, all in try/catch in the service).
         when(notificationUtil.getLocalizationMessages(anyString(), any(), anyString())).thenReturn("{}");
-        when(notificationUtil.getShortnerURL(anyString())).thenReturn("http://short/x");
+        when(notificationUtil.getShortnerURL(anyString(), any(), any())).thenReturn("http://short/x");
     }
 
     private ServiceRequest assignRequest() {
@@ -182,7 +182,7 @@ public class NotificationConfigDrivenEmissionTest {
         when(notificationUtil.getDefaultMsg(eq("CITIZEN"), anyString())).thenReturn("Default notification.");
         when(notificationUtil.getCustomizedMsgForPlaceholder(anyString(), startsWith("COMPLAINT_HIERARCHY.")))
                 .thenReturn("Garbage Not Collected");
-        when(notificationUtil.getShortnerURL(anyString())).thenReturn("http://short/x");
+        when(notificationUtil.getShortnerURL(anyString(), any(), any())).thenReturn("http://short/x");
 
         notificationService.process(legacyApplyRequest(), "save-pgr-request");
 
@@ -206,7 +206,7 @@ public class NotificationConfigDrivenEmissionTest {
         when(notificationUtil.getDefaultMsg(eq("CITIZEN"), anyString())).thenReturn("Default notification.");
         when(notificationUtil.getCustomizedMsgForPlaceholder(anyString(), startsWith("COMPLAINT_HIERARCHY.")))
                 .thenReturn(null);
-        when(notificationUtil.getShortnerURL(anyString())).thenReturn("http://short/x");
+        when(notificationUtil.getShortnerURL(anyString(), any(), any())).thenReturn("http://short/x");
 
         notificationService.process(legacyApplyRequest(), "save-pgr-request");
 
@@ -237,7 +237,7 @@ public class NotificationConfigDrivenEmissionTest {
                 .thenReturn(null);
         when(notificationUtil.getCustomizedMsgForPlaceholder(anyString(), eq("pgr.complaint.category.GarbageNeeds")))
                 .thenReturn("Garbage Not Collected");
-        when(notificationUtil.getShortnerURL(anyString())).thenReturn("http://short/x");
+        when(notificationUtil.getShortnerURL(anyString(), any(), any())).thenReturn("http://short/x");
 
         notificationService.process(legacyApplyRequest(), "save-pgr-request");
 

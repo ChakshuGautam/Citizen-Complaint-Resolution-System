@@ -385,8 +385,8 @@ public class PGRConfiguration {
     // ------------------------------------------------------------------ DIGIT 3.0 (v3)
     //
     // Each dependency carries its own API version flag so that flipping one is a config change,
-    // not a code change, and so that flipping one back is a restart rather than a revert. All six
-    // default to 2.x: nothing below is read until a flag says "v3", and this commit changes no
+    // not a code change, and so that flipping one back is a restart rather than a revert. Every one
+    // of them defaults to 2.x: nothing below is read until a flag says "v3", and this commit changes no
     // behaviour. Later commits move one dependency at a time.
     //
     // MDMS is deliberately absent. Its v3 counterpart serves no endpoints and holds no rows, and
@@ -414,6 +414,13 @@ public class PGRConfiguration {
     @Value("${egov.hrms.api.version:2.x}")
     private String hrmsApiVersion;
 
+    // url-shortening is the seventh dependency and it was missing from the flag set this block
+    // was first written with. It needs one for the same reason as the rest: the v3 shortener is a
+    // different endpoint with different required headers AND a different response media type, so
+    // "which stack are we on" cannot be inferred at the call site.
+    @Value("${egov.url.shortner.api.version:2.x}")
+    private String urlShortnerApiVersion;
+
     public boolean isIdgenV3() {
         return isV3(idgenApiVersion);
     }
@@ -436,6 +443,10 @@ public class PGRConfiguration {
 
     public boolean isHrmsV3() {
         return isV3(hrmsApiVersion);
+    }
+
+    public boolean isUrlShortnerV3() {
+        return isV3(urlShortnerApiVersion);
     }
 
     /** Only the exact string "v3" selects v3. Anything else - including a typo - stays on 2.x. */
@@ -494,6 +505,12 @@ public class PGRConfiguration {
 
     @Value("${egov.hrms.v3.jurisdiction.search.endpoint:/employee/v3/jurisdictions}")
     private String hrmsV3JurisdictionSearchEndpoint;
+
+    @Value("${egov.url.shortner.v3.host:${egov.url.shortner.host}}")
+    private String urlShortnerV3Host;
+
+    @Value("${egov.url.shortner.v3.short.url.endpoint:/url-shortener/v3/short-url}")
+    private String urlShortnerV3ShortUrlEndpoint;
 
     // v3 pages every list and refuses size > 100 with a 400. 2.x callers assume an unbounded
     // result, so every list-returning call site has to page once it is flipped.
