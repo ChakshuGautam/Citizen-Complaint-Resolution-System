@@ -139,7 +139,18 @@ class V3WorkflowContractTest extends V3ContractTestSupport {
     }
 
     @Test
-    @Disabled("Enabled by C13 — feat(workflow): move the transition to POST /workflow/v3/transition (blocked on the identity work: roles must ride a real Keycloak bearer token)")
+    @Disabled("STILL GATED after C13. The transition itself IS on POST /workflow/v3/transition now, "
+            + "and its produced request is asserted by WorkflowServiceTransitionTest. What this test "
+            + "additionally asserts is a KEYCLOAK-ISSUED bearer token, and CCRS's gateway issues an "
+            + "opaque 2.x token. Measured against the live v3 stack on 2026-09-21: an opaque uuid "
+            + "bearer -> 403 'caller role does not permit the requested action'; a JWT with no "
+            + "realm_access.roles -> the same 403; only a JWT carrying realm_access.roles -> 200. "
+            + "CCRS will not mint one - V3Headers never forges a token, and the shim's unsigned "
+            + "{alg:none} JWT is deliberately not ported, because a v3 build that verifies signatures "
+            + "kills it instantly. MISSING: the identity work (W25) - a Keycloak realm issuing tokens "
+            + "to CCRS whose realm_access.roles carry the caller's PGR roles, or a non-JWT role "
+            + "channel for trusted internal callers. Enabling this test today would mean asserting a "
+            + "token CCRS does not have.")
     void transitionIsAPostOfOneEntityWithRolesOnABearerToken() {
         // updateWorkflowStatus resolves the business service first, so the definition search comes
         // through before the transition does.

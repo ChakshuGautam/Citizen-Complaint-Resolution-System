@@ -48,6 +48,7 @@ import static org.egov.pgr.util.PGRConstants.*;
  * query parameter to a URL that no longer has that query.
  */
 @org.springframework.stereotype.Service
+@lombok.extern.slf4j.Slf4j
 public class WorkflowService {
 
     /** v3 answers 400 "size must be an integer between 1 and 100" outside this range. */
@@ -633,9 +634,111 @@ public class WorkflowService {
      */
     private ProcessInstanceResponse callWorkFlow(ProcessInstanceRequest workflowReq) {
 
+        if (pgrConfiguration.isWorkflowV3())
+            return transitionV3(workflowReq);
+
         StringBuilder url = new StringBuilder(pgrConfiguration.getWfHost().concat(pgrConfiguration.getWfTransitionPath()));
         Object optional = repository.fetchResult(url, workflowReq);
         return mapper.convertValue(optional, ProcessInstanceResponse.class);
+    }
+
+    /**
+     * {@code POST /workflow/v3/transition} — one complaint, one action.
+     *
+     * <pre>
+     *   X-Tenant-ID: &lt;tenant&gt;   X-User-ID: &lt;acting uuid&gt;   Authorization: Bearer &lt;jwt&gt;
+     *   {"processCode":"PGR","entityId":"&lt;complaint&gt;","action":"ASSIGN",
+     *    "comment":"...","documents":[...],"assignees":["&lt;uuid&gt;"],"assigner":"&lt;uuid&gt;"}
+     *   200 ONE object (not a list): {"id","processCode","entityId","action","currentState",
+     *        "assignees","assigner","comment","documents","stateSla","processSla","auditDetail"}
+     * </pre>
+     *
+     * <p>What the 2.x request carried and v3 has no field for: the {@code RequestInfo} envelope,
+     * the {@code ProcessInstances} list wrapper, {@code tenantId} (a header now) and
+     * {@code moduleName}. The last of those is worth a note in the baseline diff: CCRS sent "PGR"
+     * and 2.x OVERWROTE it with the business service's {@code business}, "pgr-services". v3 has
+     * neither field, so the reply now echoes what CCRS sent. Nothing in CCRS reads it back.
+     *
+     * <p>{@code assignes} are full 2.x User objects and v3 takes bare uuid STRINGS; CCRS only ever
+     * populated the uuid, so nothing is lost outbound. {@code assigner} is sent because the field
+     * exists and a later build may honour it — the deployed one accepts it and echoes "".
+     *
+     * <p><b>Roles.</b> The live v3 workflow service ENFORCES the {@code roles} declared on an
+     * action ("caller role does not permit the requested action", 403) and reads them from exactly
+     * one place: {@code Authorization: Bearer &lt;jwt&gt;.realm_access.roles}. The {@code X-Roles}
+     * header named in the service's own Headers constant is ignored by the shipped build. CCRS
+     * forwards the token the gateway issued and mints nothing — see {@link V3Headers}. That token
+     * is today an opaque 2.x token, so every role-guarded action (which is all of them) is answered
+     * 403 until the identity work lands. Verified 2026-09-21 against the live stack: an opaque uuid
+     * bearer and a JWT without realm_access.roles are both 403; only a JWT carrying the roles is
+     * 200. The failure is loud and carries v3's own text, which is the correct state of affairs for
+     * a capability CCRS does not yet have.
+     */
+    private ProcessInstanceResponse transitionV3(ProcessInstanceRequest workflowReq) {
+        List<ProcessInstance> processInstances = workflowReq.getProcessInstances();
+        if (processInstances == null || processInstances.size() != 1)
+            throw new CustomException("WORKFLOW_TRANSITION_BATCH_UNSUPPORTED",
+                    "A workflow transition carried " + (processInstances == null ? 0 : processInstances.size())
+                            + " process instances. 2.x accepted a list; DIGIT 3.0 POST /workflow/v3/transition takes "
+                            + "exactly ONE entity per call. pgr-services always sends one, so this is a hard error "
+                            + "rather than a partial batch, which would leave some complaints transitioned and some "
+                            + "not with no way to tell which.");
+
+        ProcessInstance processInstance = processInstances.get(0);
+        RequestInfo requestInfo = workflowReq.getRequestInfo();
+        String tenantId = V3Headers.workflowTenant(requestInfo, null, processInstance.getTenantId());
+        String which = "POST " + pgrConfiguration.getWorkflowV3TransitionPath();
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("processCode", StringUtils.isEmpty(processInstance.getBusinessService())
+                ? PGR_BUSINESSSERVICE : processInstance.getBusinessService());
+        body.put("entityId", processInstance.getBusinessId());
+        body.put("action", processInstance.getAction());
+        if (processInstance.getComment() != null)
+            body.put("comment", processInstance.getComment());
+        if (!CollectionUtils.isEmpty(processInstance.getDocuments()))
+            body.put("documents", processInstance.getDocuments());
+        if (!CollectionUtils.isEmpty(processInstance.getAssignes())) {
+            List<String> assignees = processInstance.getAssignes().stream()
+                    .map(User::getUuid)
+                    .filter(uuid -> uuid != null && !uuid.trim().isEmpty())
+                    .collect(Collectors.toList());
+            if (!assignees.isEmpty())
+                body.put("assignees", assignees);
+        }
+        String assigner = V3Headers.userIdOf(requestInfo);
+        if (assigner != null)
+            body.put("assigner", assigner);
+
+        Map<String, String> headers = V3Headers.forTenant(tenantId)
+                .withUserFrom(requestInfo)
+                .withBearerFrom(requestInfo)
+                .build();
+
+        if (!headers.containsKey(V3Headers.AUTHORIZATION))
+            log.error("Transitioning {} with action {} and NO Authorization header. DIGIT 3.0 reads action roles "
+                            + "only from a Bearer token's realm_access.roles, so any action that declares roles - which "
+                            + "is every PGR action - will be answered 403 Forbidden.",
+                    processInstance.getBusinessId(), processInstance.getAction());
+
+        Map<?, ?> response = repository.exchange(HttpMethod.POST,
+                joinUrl(pgrConfiguration.getWorkflowV3Host(), pgrConfiguration.getWorkflowV3TransitionPath()),
+                body, headers, Map.class);
+
+        if (response == null)
+            throw new CustomException("WORKFLOW_RESPONSE_UNREADABLE",
+                    "v3 " + which + " returned no body; the resulting state of complaint "
+                            + processInstance.getBusinessId() + " is unknown");
+
+        // v3 answers a transition with ONE object, not a list. The mapper throws if it carries no
+        // state code: applicationStatus goes straight onto the complaint from here, and a null
+        // there is HTTP 200 with a statusless complaint and nothing in any log.
+        ProcessInstance transitioned = v3Mapper.processInstance(response, tenantId, PGR_BUSINESSSERVICE,
+                processInstance.getModuleName(), V3Headers.userIdOf(requestInfo), which);
+
+        return ProcessInstanceResponse.builder()
+                .processInstances(Collections.singletonList(transitioned))
+                .build();
     }
 
 
