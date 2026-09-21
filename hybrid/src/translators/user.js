@@ -176,6 +176,9 @@
 // v3 stack can come up "healthy", answer searches with 200, and be incapable
 // of storing a single person.
 const gaplog = require('../gaplog');
+// The one stateful component in the shim: the durable 2.x-uuid -> v3-individual-id
+// map. Everything this translator does with it is on the record below.
+const idmap = require('../idmap');
 
 const DEP = 'egov-user';
 
@@ -356,6 +359,84 @@ function unknownRoute(req2x) {
 
 // ---------------------------------------------------------------- 1. search
 
+// 2.x uuid -> v3 individual id, through the durable map. Returns the uuid
+// unchanged when the map has no entry, so a miss degrades to exactly the
+// behaviour this file had before the map existed.
+function resolveUuid(uuid2x, tenantId) {
+  let entry = null;
+  try {
+    entry = idmap.lookup(uuid2x);
+  } catch (err) {
+    // A map that cannot be read is not "no mapping": it is an unknown answer
+    // to "which human is this", so it stops the request rather than widening
+    // it. The throw lands in server.js's catch, which gap-logs it and answers
+    // 502 - loud, not silent.
+    gaplog.record({
+      dep: DEP,
+      field: 'idmap',
+      action: 'unmapped',
+      detail:
+        `The durable 2.x-uuid -> individual-id map at ${idmap.filePath()} could not be read: ` +
+        `${err.message}. Refusing to answer a user search from a map this shim cannot parse, ` +
+        'because the alternative is handing CCRS a different person with HTTP 200.',
+    });
+    throw err;
+  }
+
+  if (!entry) {
+    gaplog.record({
+      dep: DEP,
+      field: 'accountId -> individual.id',
+      action: 'unmapped',
+      detail:
+        `The 2.x uuid ${uuid2x} is not in the durable map (${idmap.filePath()}, ` +
+        `${(() => { try { return idmap.size(); } catch { return '?'; } })()} entries). It is sent ` +
+        'to v3 UNCHANGED, which is what the stateless shim did: the individual registry has no ' +
+        'record with that id and answers an empty list, so CCRS sees INVALID_ACCOUNTID ' +
+        '(enrichUser), USER_NOT_FOUND (searchBulkUser) or a null role name -> assignee "NA" ' +
+        '(getFirstRoleNameByUuid). NOTHING IS INVENTED HERE. Closing this for real means ' +
+        'migrating every egov-user row into the individual registry and recording each ' +
+        'correspondence - one map entry per person, not one per POC.',
+    });
+    return uuid2x;
+  }
+
+  if (tenantId && entry.tenantId && entry.tenantId !== tenantId) {
+    // A map entry is a claim about a person in a tenant. Using one across a
+    // tenant boundary is how a shim leaks one tenant's citizens into another.
+    gaplog.record({
+      dep: DEP,
+      field: 'accountId -> individual.id',
+      action: 'unmapped',
+      detail:
+        `The durable map holds ${uuid2x} under tenant ${JSON.stringify(entry.tenantId)} but the ` +
+        `search arrived for tenant ${JSON.stringify(tenantId)}. The entry is NOT used and the ` +
+        '2.x uuid is sent unchanged (which will find nothing). 2.x resolves user searches at the ' +
+        'STATE-level tenant (UserService.searchUser passes getStateLevelTenant), while v3 ' +
+        'resolves them at whatever X-Tenant-ID says, so the two tenancy models do not line up ' +
+        'and the map cannot paper over that.',
+    });
+    return uuid2x;
+  }
+
+  gaplog.record({
+    dep: DEP,
+    field: 'accountId -> individual.id',
+    action: 'faked',
+    detail:
+      `Translated the 2.x egov-user uuid ${uuid2x} into the v3 individual id ${entry.individualId} ` +
+      `using the shim's durable map (${idmap.filePath()}, recorded ${entry.recordedAt} by ` +
+      `${entry.source || 'unknown'}). THIS CORRESPONDENCE EXISTS NOWHERE ELSE: v3 silently ` +
+      'discards a caller-supplied id on create and ignores the ?userId= filter, so neither ' +
+      'registry can state that these two ids are the same person. The shim is asserting it. ' +
+      'Every complaint created while this map is live carries a 2.x accountId whose only bridge ' +
+      'to the person of record is this file - lose it and the complaints are orphans.',
+  });
+  return entry.individualId;
+}
+
+
+
 // Only THREE v3 filters are actually implemented by the deployed service:
 // `id` (repeatable), `individualId` and `mobileNumber`. Everything else in the
 // spec's parameter list - `userId`, `givenName`, and any unknown name at all -
@@ -397,7 +478,17 @@ function searchToV3(req2x) {
       );
     }
     // The repeated form, NOT the comma form: ?id=a,b answers 400.
-    for (const u of uuids) params.push(`id=${encodeURIComponent(u)}`);
+    //
+    // Every uuid arriving here is an egov-user row id (CCRS mints it at login
+    // and stamps it on the complaint as accountId, EnrichmentService:64). v3
+    // has never heard of it, and CANNOT be taught it - see idmap.js. So each
+    // one is resolved through the durable map and the V3 INDIVIDUAL ID is sent
+    // instead. An uuid the map does not hold is sent UNCHANGED, which is
+    // precisely the pre-map behaviour: v3 answers "no such individual", the
+    // caller gets the same honest empty list it got before, and no existing
+    // call path (getFirstRoleNameByUuid asking about an employee, say) changes
+    // shape because this file learned to translate the one citizen it knows.
+    for (const u of uuids) params.push(`id=${encodeURIComponent(resolveUuid(u, tenantId))}`);
     size = Math.max(uuids.length, 1);
   } else if (userName || mobileNumber) {
     const value = mobileNumber || userName;
@@ -601,10 +692,57 @@ function searchToV2(v3Response, req2x) {
     });
   }
 
+  const users = individuals.map((ind) => mapIndividualToUser(ind, req2x, tenantId));
+  restoreUuids(users, req2x);
+
   return {
     responseInfo: responseInfo(req2x, 'GET /individual/v3/individuals'),
-    user: individuals.map((ind) => mapIndividualToUser(ind, req2x, tenantId)),
+    user: users,
   };
+}
+
+// The answer has to come back wearing the identity CCRS asked with, or the
+// map only half works. pgr-services reads the uuid off this reply in three
+// places: enrichUser:110 (non-empty is enough), enrichUsers:66 which does
+// idToUserMap.get(service.getAccountId()) - a lookup keyed by the 2.x uuid
+// already stored on the complaint - and upsertUser:97 which writes getUuid()
+// back onto the complaint as the new accountId. Hand back a v3 individual id
+// and the second silently attaches a NULL citizen to every complaint (HTTP
+// 200, no error anywhere) and the third rewrites a good accountId into one
+// egov-user cannot resolve. So the forward substitution above is undone here.
+function restoreUuids(users, req2x) {
+  for (const user of users) {
+    if (!user || typeof user.uuid !== 'string' || !user.uuid) continue;
+    let back = null;
+    try {
+      back = idmap.reverse(user.uuid);
+    } catch (err) {
+      gaplog.record({
+        dep: DEP,
+        field: 'idmap',
+        action: 'unmapped',
+        detail: `Reverse lookup of individual ${user.uuid} failed: ${err.message}`,
+      });
+      throw err;
+    }
+    if (!back) continue;
+    gaplog.record({
+      dep: DEP,
+      field: 'user.uuid',
+      action: 'faked',
+      detail:
+        `Answered with the 2.x uuid ${back.uuid2x} in place of the v3 individual id ${user.uuid}, ` +
+        `from the durable map (${idmap.filePath()}). CCRS is therefore told the person still has ` +
+        'the identity it has always used, which is the only way its own joins keep working ' +
+        '(enrichUsers keys a map by accountId; upsertUser writes this value back onto the ' +
+        'complaint). It is also a LIE ABOUT WHERE THE RECORD LIVES: nothing in the v3 registry ' +
+        'carries this uuid, and every answer that passes through here is only as true as this ' +
+        "shim's file. The honest end state is CCRS holding v3 ids, which means rewriting the " +
+        'accountId column of every existing complaint - a data migration, not a translation.',
+    });
+    user.uuid = back.uuid2x;
+  }
+  return users;
 }
 
 // ---------------------------------------------------------------- 2. create

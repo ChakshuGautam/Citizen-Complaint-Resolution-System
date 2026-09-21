@@ -13,9 +13,14 @@ services:
       PORT: "9100"
       V3_BASE: "http://d3-kong:8000"
       GAP_LOG: "/gaps/gaps.jsonl"
+      # The durable 2.x-uuid -> v3-individual-id map (src/idmap.js): the ONLY
+      # state this shim owns. Bind-mounted so it survives a rebuild and so the
+      # host-side seeder writes the same file the container reads.
+      ID_MAP: "/state/idmap.json"
     volumes:
       # /opt/hybrid-shim/gaps.jsonl is a symlink to ./gaps/gaps.jsonl on the host
       - ./gaps:/gaps
+      - ./state:/state
     networks:
       - digit_egov-network
       - digit3_default
