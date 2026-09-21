@@ -20,7 +20,10 @@ import org.mockito.junit.MockitoJUnitRunner;
 import java.util.*;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
@@ -133,6 +136,79 @@ public class ComplaintsEventsTest {
         List<Map<String, Object>> stakeholders = (List<Map<String, Object>>) payload.get("stakeholders");
         assertNotNull(stakeholders);
         assertEquals(2, stakeholders.size());
+
+        // The assertion this test was missing, and the reason the "NA" regression could ship green.
+        // This fixture carries no lastModifiedBy at all, so the role is genuinely unresolvable -
+        // and an unresolvable role is now an ABSENT value, never the literal string "NA", which a
+        // consumer cannot tell apart from a role that resolved.
+        Map<String, Object> data = (Map<String, Object>) payload.get("data");
+        assertNotNull(data);
+        assertTrue("assigneeName must always be present in the payload", data.containsKey("assigneeName"));
+        assertNull(data.get("assigneeName"));
+    }
+
+    /**
+     * The regression this commit exists to stop, in the exact shape DIGIT 3.0 produces it.
+     *
+     * <p>v3 has no roles in EITHER identity registry - employee_v3 has no roles column and the
+     * individual registry has none either - so the user-service lookup answers null, which is what
+     * {@code getFirstRoleNameByUuid} returning null means here. The old code turned that into the
+     * literal "NA" on every outbound domain event, silently: no error, no log, no failing test,
+     * and a 0-line diff in the lifecycle harness between a correct run and a broken one. The only
+     * place it was visible was the complaints.domain.events topic itself.
+     */
+    @Test
+    public void assigneeRoleComesFromTheCallersOwnTokenWhenTheRegistryHasNoRoles() {
+        ServiceRequest eventRequest = buildRequest("ASSIGN", "PENDINGATLME", "pb.amritsar");
+        eventRequest.getService().getAuditDetails().setLastModifiedBy("actor-uuid");
+        eventRequest.getRequestInfo().getUserInfo().setRoles(Collections.singletonList(
+                org.egov.common.contract.request.Role.builder().code("PGR_LME").name("Employee").build()));
+
+        domainEventService.publishWorkflowTransitionEvent(eventRequest, "PENDINGFORASSIGNMENT");
+
+        Map<String, Object> data = capturedData();
+        assertEquals("Employee", data.get("assigneeName"));
+        // ...and, explicitly, not the old default.
+        assertNotEquals("NA", data.get("assigneeName"));
+        // The gateway already had the answer, so no round trip was made at all.
+        verify(userService, never()).getFirstRoleNameByUuid(any(), any(), any());
+    }
+
+    @Test
+    public void assigneeRoleFallsBackToTheUserLookupWhenTheModifierIsSomebodyElse() {
+        ServiceRequest eventRequest = buildRequest("RESOLVE", "RESOLVED", "pb.amritsar");
+        eventRequest.getService().getAuditDetails().setLastModifiedBy("someone-else-uuid");
+        eventRequest.getRequestInfo().getUserInfo().setRoles(Collections.singletonList(
+                org.egov.common.contract.request.Role.builder().code("PGR_LME").name("Employee").build()));
+        when(userService.getFirstRoleNameByUuid(eq("someone-else-uuid"), eq("pb.amritsar"), any()))
+                .thenReturn("Grievance Routing Officer");
+
+        domainEventService.publishWorkflowTransitionEvent(eventRequest, "PENDINGATLME");
+
+        assertEquals("Grievance Routing Officer", capturedData().get("assigneeName"));
+    }
+
+    @Test
+    public void anUnresolvableAssigneeRoleIsAbsentRatherThanTheLiteralStringNA() {
+        ServiceRequest eventRequest = buildRequest("RESOLVE", "RESOLVED", "pb.amritsar");
+        eventRequest.getService().getAuditDetails().setLastModifiedBy("someone-else-uuid");
+        when(userService.getFirstRoleNameByUuid(eq("someone-else-uuid"), eq("pb.amritsar"), any()))
+                .thenReturn(null);
+
+        domainEventService.publishWorkflowTransitionEvent(eventRequest, "PENDINGATLME");
+
+        Map<String, Object> data = capturedData();
+        assertTrue(data.containsKey("assigneeName"));
+        assertNull(data.get("assigneeName"));
+        assertNotEquals("NA", data.get("assigneeName"));
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> capturedData() {
+        ArgumentCaptor<Object> payloadCaptor = ArgumentCaptor.forClass(Object.class);
+        verify(producer).push(eq("pb.amritsar"), eq("complaints.domain.events"), payloadCaptor.capture());
+        Map<String, Object> payload = (Map<String, Object>) payloadCaptor.getValue();
+        return (Map<String, Object>) payload.get("data");
     }
 
     @Test

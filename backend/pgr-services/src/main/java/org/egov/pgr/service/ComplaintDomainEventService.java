@@ -218,23 +218,84 @@ public class ComplaintDomainEventService {
         return null;
     }
 
+    /**
+     * The role name of whoever last moved the complaint.
+     *
+     * <p>Despite its name this field is not a person's name: it is
+     * {@code roles.get(0).getName()} for {@code auditDetails.lastModifiedBy}, and it has always
+     * been a role. That matters here, because DIGIT 3.0 has no roles ANYWHERE in either identity
+     * registry - {@code employee_v3} has no roles column and the individual registry has none
+     * either; roles are Keycloak realm roles. Measured on the live stack, the employee POC asked
+     * about the GRO three times per lifecycle and got {@code roles: []} every time.
+     *
+     * <p>The old code turned every one of those into the literal string {@code "NA"}, on every
+     * outbound domain event, with no error, no log line and no failing test - the lifecycle
+     * harness could not see it at all (a 0-line diff between a correct run and a broken one) and
+     * it was visible only by reading the complaints.domain.events topic directly. This is that
+     * bug, fixed before it shipped.
+     *
+     * <p>The fix is not a lookup at all. {@code requestInfo.getUserInfo()} is filled by the
+     * GATEWAY from the caller's token and it DOES carry roles, on both stacks - so when the
+     * modifier is the acting user, which is the case for every transition CCRS itself performs,
+     * the answer is already in hand and costs no round trip. That also closes the half the
+     * employee map could not: on APPLY the modifier is the CITIZEN, resolved through the
+     * individual registry, which has no roles either.
+     *
+     * <p>When it genuinely cannot be resolved the event carries {@code null}, not {@code "NA"}.
+     * "NA" is a value; it is indistinguishable from a role that happens to be called NA, and a
+     * consumer cannot tell a missing answer from an answered one. An absent value plus an ERROR
+     * naming the complaint and the uuid can be found and counted.
+     *
+     * <p>One ordering caveat, stated because it is a real difference and not a shrug: 2.x took
+     * {@code roles[0]} as egov-user ordered them, and this takes {@code roles[0]} as the token
+     * orders them. For a single-role citizen or employee - every actor in the lab - they are the
+     * same string. For a multi-role user they may not be.
+     */
     private String getAssigneeName(ServiceRequest request) {
         org.egov.pgr.web.models.Service service = request.getService();
-        if (service != null && service.getAuditDetails() != null
-                && StringUtils.hasText(service.getAuditDetails().getLastModifiedBy())) {
-            try {
-                String roleName = userService.getFirstRoleNameByUuid(
-                        service.getAuditDetails().getLastModifiedBy(),
-                        service.getTenantId(),
-                        request.getRequestInfo()
-                );
-                if (roleName != null) return roleName;
-            } catch (Exception e) {
-                log.warn("Failed to fetch role for lastModifiedBy uuid={}",
-                        service.getAuditDetails().getLastModifiedBy(), e);
-            }
+        String modifierUuid = service != null && service.getAuditDetails() != null
+                ? service.getAuditDetails().getLastModifiedBy() : null;
+
+        if (!StringUtils.hasText(modifierUuid))
+            return unresolved(request, null, "the complaint carries no auditDetails.lastModifiedBy");
+
+        String fromToken = roleNameOfActingUser(request.getRequestInfo(), modifierUuid);
+        if (fromToken != null)
+            return fromToken;
+
+        try {
+            String roleName = userService.getFirstRoleNameByUuid(
+                    modifierUuid, service.getTenantId(), request.getRequestInfo());
+            if (roleName != null) return roleName;
+        } catch (Exception e) {
+            log.warn("Failed to fetch role for lastModifiedBy uuid={}", modifierUuid, e);
         }
-        return "NA";
+
+        return unresolved(request, modifierUuid,
+                "the acting user is somebody else and the identity registry returned no roles for this uuid "
+                        + "(DIGIT 3.0 keeps roles in Keycloak, not on an individual or an employee)");
+    }
+
+    /**
+     * The modifier's first role name taken from the caller's own token, or null when the modifier
+     * is not the caller or the token carries no roles.
+     */
+    private String roleNameOfActingUser(RequestInfo requestInfo, String modifierUuid) {
+        User actor = requestInfo == null ? null : requestInfo.getUserInfo();
+        if (actor == null || !modifierUuid.equals(actor.getUuid()) || CollectionUtils.isEmpty(actor.getRoles()))
+            return null;
+        org.egov.common.contract.request.Role role = actor.getRoles().get(0);
+        if (role == null) return null;
+        return StringUtils.hasText(role.getName()) ? role.getName() : role.getCode();
+    }
+
+    private String unresolved(ServiceRequest request, String modifierUuid, String reason) {
+        log.error("assigneeName unresolved on complaint {}: {}. The domain event will carry a null assigneeName "
+                        + "rather than the literal \"NA\", which is indistinguishable from a resolved value. "
+                        + "lastModifiedBy={}",
+                request.getService() == null ? "(no service)" : request.getService().getServiceRequestId(),
+                reason, modifierUuid);
+        return null;
     }
 
     private String getAssigneeDesignation(ServiceRequest request) {
