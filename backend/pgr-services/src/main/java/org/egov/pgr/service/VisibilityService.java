@@ -63,16 +63,19 @@ public class VisibilityService {
     private final WorkflowService workflowService;
     private final ServiceRequestRepository serviceRequestRepository;
     private final org.egov.pgr.util.MDMSUtils mdmsUtils;
+    private final org.egov.pgr.repository.SupervisorEdgeRepository supervisorEdgeRepository;
 
     @Autowired
     public VisibilityService(PGRConfiguration config, HrmsProjectionRepository projectionRepository,
                              WorkflowService workflowService, ServiceRequestRepository serviceRequestRepository,
-                             org.egov.pgr.util.MDMSUtils mdmsUtils) {
+                             org.egov.pgr.util.MDMSUtils mdmsUtils,
+                             org.egov.pgr.repository.SupervisorEdgeRepository supervisorEdgeRepository) {
         this.config = config;
         this.projectionRepository = projectionRepository;
         this.workflowService = workflowService;
         this.serviceRequestRepository = serviceRequestRepository;
         this.mdmsUtils = mdmsUtils;
+        this.supervisorEdgeRepository = supervisorEdgeRepository;
     }
 
     /** Mutates the criteria with the requested visibility scope. */
@@ -109,6 +112,26 @@ public class VisibilityService {
             // Fallback rule (design §4.2): no projected reportees — whether the
             // user is a leaf employee or the reportingTo data is unmaintained —
             // means TEAM stays the tenant-wide open view, never an empty inbox.
+            //
+            // That rule is safe when the hierarchy is KNOWN and this user is simply a leaf. It is
+            // NOT safe when the hierarchy is unknown, and on DIGIT 3.0 it is unknown by default:
+            // v3 has no supervisor edge on any employee, so every projection row would carry a
+            // null reporting_to, every reportee walk would come back empty, and EVERY supervisor's
+            // "my team" inbox would quietly become "the whole tenant" - not an empty inbox, which
+            // somebody would report, but everyone else's complaints, which nobody would.
+            //
+            // So on v3 the widening is conditional on CCRS actually holding an org chart. With an
+            // empty supervisor edge, TEAM degrades to MINE and says so, because showing a
+            // supervisor less than they are entitled to is recoverable and showing them a whole
+            // tenant's citizen data is not.
+            if (config.isHrmsV3() && supervisorEdgeRepository.countForTenant(tenantId) == 0) {
+                log.error("Visibility TEAM for {} in tenant {}: DIGIT 3.0 supplies no supervisor edge and CCRS's "
+                        + "own eg_pgr_supervisor_edge is EMPTY for this tenant, so there is no hierarchy to "
+                        + "resolve. Restricting TEAM to MINE rather than widening to the tenant-wide view. Seed "
+                        + "the edge (SupervisorEdgeService.seedFromProjection) or maintain it in CCRS.", me, tenantId);
+                criteria.setAssignee(me);
+                return;
+            }
             return;
         }
 

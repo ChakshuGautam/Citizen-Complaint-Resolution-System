@@ -57,26 +57,25 @@ public class EscalationScheduler {
         }
 
         if (config.isWorkflowV3()) {
-            // Refused as a whole rather than per complaint. Automatic escalation cannot work on
-            // DIGIT 3.0 for two independent reasons, and neither is a mapping problem:
+            // Refused as a whole rather than per complaint. ESCALATE is a SELF-LOOP in the PGR
+            // process definition: v3 accepts it at registration and then answers every runtime
+            // attempt 409 "invalid state transition: no transition" (M2). Letting the sweep run
+            // would mean a 409 per eligible complaint on every tick, each one caught and logged by
+            // the per-complaint handler below, and a scan reporting "escalated=0" as though
+            // nothing were due - a busy no-op that reads as a quiet night.
             //
-            //   1. ESCALATE is a SELF-LOOP in the PGR definition. v3 stores it and answers every
-            //      attempt 409 "invalid state transition: no transition".
-            //   2. Escalation re-targets the complaint to the current assignee's reportingTo, and
-            //      v3's employee registry has no supervisor column at all - no such field exists
-            //      in any v3 employee request or response, and inventing one would route a real
-            //      citizen's complaint to the wrong person, silently.
-            //
-            // Letting the sweep run would mean a 409 per eligible complaint on every tick, each
-            // one caught and logged by the per-complaint handler below, and a scan that reports
-            // "escalated=0" as though nothing were due. One ERROR naming the fact is more useful
-            // and far harder to miss.
+            // NOTE, and this changed with the supervisor-edge commit: the SECOND reason this used
+            // to give - "and there is no reportingTo to re-target to" - is no longer true. CCRS
+            // now owns the edge in eg_pgr_supervisor_edge, so resolveNextAssignee has an answer on
+            // v3. The workflow self-loop is the only remaining blocker, which means this refusal
+            // disappears the moment v3 honours self-loops or CCRS stops routing ESCALATE through
+            // the workflow engine - and the escalation ladder will work when it does.
             log.error("Automatic escalation is enabled (pgr.escalation.enabled=true) but the workflow dependency "
                     + "is on DIGIT 3.0, which cannot perform ESCALATE: it is a self-loop action, which v3 stores "
-                    + "and then refuses at runtime with 409 'invalid state transition: no transition', and v3's "
-                    + "employee registry has no reportingTo to re-target the complaint to. SKIPPING the escalation "
-                    + "scan entirely. Set pgr.escalation.enabled=false to make this an accepted, recorded "
-                    + "capability loss, or keep egov.workflow.api.version=2.x.");
+                    + "and then refuses at runtime with 409 'invalid state transition: no transition'. SKIPPING "
+                    + "the escalation scan entirely. The supervisor edge is NOT the blocker - CCRS owns that now "
+                    + "(eg_pgr_supervisor_edge). Set pgr.escalation.enabled=false to make this an accepted, "
+                    + "recorded capability loss, or keep egov.workflow.api.version=2.x.");
             return;
         }
 

@@ -71,7 +71,11 @@ class EscalationSchedulerV3RefusalTest {
         scheduler.scanAndEscalate();
 
         // Nothing is discovered, nothing is scanned, nothing is escalated. The refusal is an ERROR
-        // log naming both reasons and the way out (pgr.escalation.enabled=false, or stay on 2.x).
+        // log naming the reason and the way out (pgr.escalation.enabled=false, or stay on 2.x).
+        // That reason is now SINGULAR: ESCALATE is a workflow self-loop, which v3 refuses at
+        // runtime with a 409. The supervisor edge that used to be the second reason is owned by
+        // CCRS in eg_pgr_supervisor_edge, so resolveNextAssignee has an answer on v3 - this
+        // refusal is a workflow limitation now, not an identity one.
         verify(configurationService, never()).resolveStateTenants(any(), any());
         verify(repository, never()).getComplaintTenantIds(any());
     }

@@ -6,6 +6,7 @@ import org.egov.common.contract.request.RequestInfo;
 import org.egov.pgr.config.PGRConfiguration;
 import org.egov.pgr.identity.EmployeeV3Client;
 import org.egov.pgr.repository.ServiceRequestRepository;
+import org.egov.pgr.repository.SupervisorEdgeRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -36,6 +37,7 @@ class HRMSUtilV3DispatchTest {
 
     private ServiceRequestRepository serviceRequestRepository;
     private EmployeeV3Client employeeV3Client;
+    private SupervisorEdgeRepository supervisorEdgeRepository;
     private PGRConfiguration config;
     private HRMSUtil hrmsUtil;
 
@@ -43,10 +45,11 @@ class HRMSUtilV3DispatchTest {
     void setUp() {
         serviceRequestRepository = mock(ServiceRequestRepository.class);
         employeeV3Client = mock(EmployeeV3Client.class);
+        supervisorEdgeRepository = mock(SupervisorEdgeRepository.class);
         config = new PGRConfiguration();
         config.setHrmsHost("http://hrms:8092");
         config.setHrmsEndPoint("/egov-hrms/employees/_search");
-        hrmsUtil = new HRMSUtil(serviceRequestRepository, config, employeeV3Client);
+        hrmsUtil = new HRMSUtil(serviceRequestRepository, config, employeeV3Client, supervisorEdgeRepository);
     }
 
     /** The 2.x HRMS shape, which the v3 client also answers in so the JsonPaths do not move. */
@@ -94,13 +97,34 @@ class HRMSUtilV3DispatchTest {
     }
 
     @Test
-    @DisplayName("v3: there is no supervisor, so getSupervisorUuid answers null rather than inventing one")
-    void v3SupervisorIsAbsent() {
+    @DisplayName("v3: the supervisor comes from CCRS's own edge, NOT from the employee registry")
+    void v3SupervisorComesFromTheCcrsEdge() {
         config.setHrmsApiVersion(PGRConfiguration.API_VERSION_V3);
-        when(employeeV3Client.searchByLegacyUuids(anyCollection(), eq(TENANT), any()))
-                .thenReturn(employees("SANITATION", null));
+        when(supervisorEdgeRepository.findSupervisorUuid(EMPLOYEE_UUID)).thenReturn("boss-uuid");
+
+        assertEquals("boss-uuid", hrmsUtil.getSupervisorUuid(EMPLOYEE_UUID, new RequestInfo(), TENANT));
+        // d3-employee is never asked: it has no supervisor column to answer with.
+        verify(employeeV3Client, never()).searchByLegacyUuids(anyCollection(), anyString(), any());
+    }
+
+    @Test
+    @DisplayName("v3: with no CCRS edge the answer is null — the honest 'CCRS does not know', never an invented one")
+    void v3NoEdgeMeansNoSupervisor() {
+        config.setHrmsApiVersion(PGRConfiguration.API_VERSION_V3);
+        when(supervisorEdgeRepository.findSupervisorUuid(EMPLOYEE_UUID)).thenReturn(null);
 
         assertNull(hrmsUtil.getSupervisorUuid(EMPLOYEE_UUID, new RequestInfo(), TENANT));
+    }
+
+    @Test
+    @DisplayName("2.x: the CCRS edge is not consulted at all — HRMS is still the source of truth")
+    void twoXDoesNotUseTheCcrsEdge() {
+        config.setHrmsApiVersion(PGRConfiguration.API_VERSION_2X);
+        when(serviceRequestRepository.fetchResult(any(), any()))
+                .thenReturn(new ObjectMapper().convertValue(employees("SANITATION", "hrms-boss"), Map.class));
+
+        assertEquals("hrms-boss", hrmsUtil.getSupervisorUuid(EMPLOYEE_UUID, new RequestInfo(), TENANT));
+        verify(supervisorEdgeRepository, never()).findSupervisorUuid(anyString());
     }
 
     @Test

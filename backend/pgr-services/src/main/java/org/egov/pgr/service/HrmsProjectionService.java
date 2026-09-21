@@ -35,6 +35,7 @@ public class HrmsProjectionService {
     private final PGRConfiguration config;
     private final ObjectMapper mapper;
     private final org.egov.pgr.identity.EmployeeV3Client employeeV3Client;
+    private final org.egov.pgr.repository.SupervisorEdgeRepository supervisorEdgeRepository;
 
     @Value("${egov.state.level.tenant.id:ke}")
     private String stateLevelTenantId;
@@ -45,12 +46,14 @@ public class HrmsProjectionService {
     public HrmsProjectionService(HrmsProjectionRepository projectionRepository,
                                  ServiceRequestRepository serviceRequestRepository,
                                  PGRConfiguration config, ObjectMapper mapper,
-                                 org.egov.pgr.identity.EmployeeV3Client employeeV3Client) {
+                                 org.egov.pgr.identity.EmployeeV3Client employeeV3Client,
+                                 org.egov.pgr.repository.SupervisorEdgeRepository supervisorEdgeRepository) {
         this.projectionRepository = projectionRepository;
         this.serviceRequestRepository = serviceRequestRepository;
         this.config = config;
         this.mapper = mapper;
         this.employeeV3Client = employeeV3Client;
+        this.supervisorEdgeRepository = supervisorEdgeRepository;
     }
 
     /** Upsert one HRMS employee node (same shape in topics and _search). */
@@ -78,6 +81,13 @@ public class HrmsProjectionService {
                 department = assignment.path("department").asText(null);
                 break;
             }
+        }
+
+        if (config.isHrmsV3()) {
+            // v3 supplies no reportingTo on any row, so the projection would go all-NULL and the
+            // reportee CTE would return nothing for everyone - which VisibilityService reads as
+            // "show the whole tenant". The edge comes from CCRS's own table instead.
+            reportingTo = supervisorEdgeRepository.findSupervisorUuid(uuid);
         }
 
         projectionRepository.upsert(uuid, tenantId, reportingTo, department, active);

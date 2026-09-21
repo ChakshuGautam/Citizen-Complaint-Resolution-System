@@ -94,5 +94,16 @@ class PGRConfigurationV3FlagsTest {
         assertEquals("/employee/v3/employees", properties.getProperty("egov.hrms.v3.employee.search.endpoint"));
         assertEquals("/url-shortener/v3/short-url", properties.getProperty("egov.url.shortner.v3.short.url.endpoint"));
         assertEquals("100", properties.getProperty("egov.v3.page.max.size"));
+
+        // The one knob whose shipped value must be EMPTY. v3 demands a gender on individual-create
+        // and offers only MALE/FEMALE/OTHER; CCRS's user model has no gender field, so any value
+        // here is a fact invented about every citizen CCRS registers. A merge that quietly filled
+        // it in would turn a loud refusal into a silent default, which is the failure mode this
+        // whole migration exists to eliminate.
+        String defaultGender = properties.getProperty("egov.user.v3.individual.default.gender");
+        assertTrue(defaultGender == null || defaultGender.trim().isEmpty()
+                        || defaultGender.trim().equals("${EGOV_USER_V3_INDIVIDUAL_DEFAULT_GENDER:}"),
+                "egov.user.v3.individual.default.gender must ship BLANK: a value here invents a gender "
+                        + "for every citizen CCRS creates on DIGIT 3.0, got '" + defaultGender + "'");
     }
 }

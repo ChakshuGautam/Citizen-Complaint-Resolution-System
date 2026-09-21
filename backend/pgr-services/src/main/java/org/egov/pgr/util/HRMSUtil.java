@@ -8,6 +8,7 @@ import org.egov.common.contract.request.RequestInfo;
 import org.egov.pgr.config.PGRConfiguration;
 import org.egov.pgr.identity.EmployeeV3Client;
 import org.egov.pgr.repository.ServiceRequestRepository;
+import org.egov.pgr.repository.SupervisorEdgeRepository;
 import org.egov.pgr.web.models.RequestInfoWrapper;
 import org.egov.tracer.model.CustomException;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -32,13 +33,16 @@ public class HRMSUtil {
 
     private EmployeeV3Client employeeV3Client;
 
+    private SupervisorEdgeRepository supervisorEdgeRepository;
+
 
     @Autowired
     public HRMSUtil(ServiceRequestRepository serviceRequestRepository, PGRConfiguration config,
-                    EmployeeV3Client employeeV3Client) {
+                    EmployeeV3Client employeeV3Client, SupervisorEdgeRepository supervisorEdgeRepository) {
         this.serviceRequestRepository = serviceRequestRepository;
         this.config = config;
         this.employeeV3Client = employeeV3Client;
+        this.supervisorEdgeRepository = supervisorEdgeRepository;
     }
 
     /**
@@ -98,6 +102,25 @@ public class HRMSUtil {
      * Returns null if no supervisor found.
      */
     public String getSupervisorUuid(String employeeUuid, RequestInfo requestInfo, String tenantId) {
+
+        if (config.isHrmsV3()) {
+            // DIGIT 3.0 has no supervisor edge to read, at any effort: no column on employee_v3,
+            // no field in any v3 employee request or response, zero hits for reportingTo across
+            // all sixteen specs. CCRS OWNS the edge instead (eg_pgr_supervisor_edge) rather than
+            // disabling escalation, because escalation is not the only consumer: the inbox reads
+            // the same edge through the projection and, with none, TEAM silently becomes the
+            // whole tenant. A flag would have left that half broken and quiet.
+            //
+            // It is NOT derived from jurisdiction. That was measured: all the lab employees share
+            // one jurisdiction across three rungs of the ladder, so a jurisdiction derivation
+            // yields a hierarchy cycle. An invented supervisor routes a real citizen's complaint
+            // to the wrong person, silently, and that is the one fake that must be refused.
+            String supervisorUuid = supervisorEdgeRepository.findSupervisorUuid(employeeUuid);
+            if (supervisorUuid == null)
+                log.info("No CCRS-owned supervisor edge for employee {} in tenant {}; DIGIT 3.0 has none to fall "
+                        + "back on, so this employee is top of the hierarchy as far as CCRS knows", employeeUuid, tenantId);
+            return supervisorUuid;
+        }
 
         Object res = fetchEmployees(Collections.singletonList(employeeUuid), requestInfo, tenantId);
 
