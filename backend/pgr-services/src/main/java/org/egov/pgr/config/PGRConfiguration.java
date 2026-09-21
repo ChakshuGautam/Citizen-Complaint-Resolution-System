@@ -382,4 +382,122 @@ public class PGRConfiguration {
     @Value("${egov.enc.decrypt.endpoint:/egov-enc-service/crypto/v1/_decrypt}")
     private String encDecryptEndpoint;
 
+    // ------------------------------------------------------------------ DIGIT 3.0 (v3)
+    //
+    // Each dependency carries its own API version flag so that flipping one is a config change,
+    // not a code change, and so that flipping one back is a restart rather than a revert. All six
+    // default to 2.x: nothing below is read until a flag says "v3", and this commit changes no
+    // behaviour. Later commits move one dependency at a time.
+    //
+    // MDMS is deliberately absent. Its v3 counterpart serves no endpoints and holds no rows, and
+    // the 2.x host already points at an nginx that rewrites v1 to v2 in production, so the 16 MDMS
+    // call sites stay on fetchResult and stay on 2.x.
+
+    public static final String API_VERSION_2X = "2.x";
+    public static final String API_VERSION_V3 = "v3";
+
+    @Value("${egov.idgen.api.version:2.x}")
+    private String idgenApiVersion;
+
+    @Value("${egov.boundary.api.version:2.x}")
+    private String boundaryApiVersion;
+
+    @Value("${egov.workflow.api.version:2.x}")
+    private String workflowApiVersion;
+
+    @Value("${egov.user.api.version:2.x}")
+    private String userApiVersion;
+
+    @Value("${egov.localization.api.version:2.x}")
+    private String localizationApiVersion;
+
+    @Value("${egov.hrms.api.version:2.x}")
+    private String hrmsApiVersion;
+
+    public boolean isIdgenV3() {
+        return isV3(idgenApiVersion);
+    }
+
+    public boolean isBoundaryV3() {
+        return isV3(boundaryApiVersion);
+    }
+
+    public boolean isWorkflowV3() {
+        return isV3(workflowApiVersion);
+    }
+
+    public boolean isUserV3() {
+        return isV3(userApiVersion);
+    }
+
+    public boolean isLocalizationV3() {
+        return isV3(localizationApiVersion);
+    }
+
+    public boolean isHrmsV3() {
+        return isV3(hrmsApiVersion);
+    }
+
+    /** Only the exact string "v3" selects v3. Anything else - including a typo - stays on 2.x. */
+    private boolean isV3(String apiVersion) {
+        return API_VERSION_V3.equalsIgnoreCase(apiVersion == null ? null : apiVersion.trim());
+    }
+
+    // v3 hosts and paths. They are separate properties rather than a rewrite of the 2.x ones so
+    // that both stacks can be addressed at once during a flip, and so that a rollback needs no
+    // knowledge of what the 2.x value used to be.
+
+    @Value("${egov.idgen.v3.host:${egov.idgen.host}}")
+    private String idgenV3Host;
+
+    @Value("${egov.idgen.v3.generate.path:/idgen/v3/generate}")
+    private String idgenV3GeneratePath;
+
+    @Value("${egov.idgen.v3.generate.bulk.path:/idgen/v3/generate/bulk}")
+    private String idgenV3GenerateBulkPath;
+
+    @Value("${egov.boundary.v3.host:${egov.boundary.host}}")
+    private String boundaryV3Host;
+
+    @Value("${egov.boundary.v3.search.url:/boundary/v3/boundaries}")
+    private String boundaryV3SearchEndpoint;
+
+    @Value("${egov.boundary.v3.relationship.search.url:/boundary/v3/relationship}")
+    private String boundaryV3RelationshipSearchEndpoint;
+
+    @Value("${egov.workflow.v3.host:${egov.workflow.host}}")
+    private String workflowV3Host;
+
+    @Value("${egov.workflow.v3.transition.path:/workflow/v3/transition}")
+    private String workflowV3TransitionPath;
+
+    @Value("${egov.workflow.v3.processdefinition.search.path:/workflow/v3/process/definition}")
+    private String workflowV3ProcessDefinitionSearchPath;
+
+    @Value("${egov.user.v3.host:${egov.user.host}}")
+    private String userV3Host;
+
+    @Value("${egov.user.v3.individual.path:/individual/v3/individuals}")
+    private String userV3IndividualPath;
+
+    @Value("${egov.localization.v3.host:${egov.localization.host}}")
+    private String localizationV3Host;
+
+    @Value("${egov.localization.v3.search.endpoint:/localization/v3/messages}")
+    private String localizationV3SearchEndpoint;
+
+    @Value("${egov.hrms.v3.host:${egov.hrms.host}}")
+    private String hrmsV3Host;
+
+    @Value("${egov.hrms.v3.employee.search.endpoint:/employee/v3/employees}")
+    private String hrmsV3EmployeeSearchEndpoint;
+
+    @Value("${egov.hrms.v3.jurisdiction.search.endpoint:/employee/v3/jurisdictions}")
+    private String hrmsV3JurisdictionSearchEndpoint;
+
+    // v3 pages every list and refuses size > 100 with a 400. 2.x callers assume an unbounded
+    // result, so every list-returning call site has to page once it is flipped.
+    @Value("${egov.v3.page.max.size:100}")
+    private Integer v3PageMaxSize;
+
 }
