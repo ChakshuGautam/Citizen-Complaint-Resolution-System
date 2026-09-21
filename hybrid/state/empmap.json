@@ -1,0 +1,119 @@
+{
+  "version": 1,
+  "entries": {
+    "21fc9b81-9e52-43a5-ac1a-00db84dc2a6a": {
+      "recordedAt": "2026-09-21T03:00:49.229Z",
+      "employeeId": "1c2936c6-e6c8-42cc-ad70-432acee63b5a",
+      "employeeCode": "PGGRO1",
+      "tenantId": "pg",
+      "migratedName": "PG Grievance Officer",
+      "migratedRoles": [
+        {
+          "code": "EMPLOYEE",
+          "name": "Employee",
+          "tenantId": "pg"
+        },
+        {
+          "code": "GRO",
+          "name": "Complaint Assessor",
+          "tenantId": "pg"
+        },
+        {
+          "code": "PGR_LME",
+          "name": "Complaint Resolver",
+          "tenantId": "pg"
+        },
+        {
+          "code": "CSR",
+          "name": "Complainant",
+          "tenantId": "pg"
+        }
+      ],
+      "keycloakSub": null,
+      "source": "seed-empmap.js"
+    },
+    "165804ce-d0bb-4f2a-9472-e011571ea872": {
+      "recordedAt": "2026-09-21T03:00:49.424Z",
+      "employeeId": "49f51551-ffb8-4031-bbd2-927760a91023",
+      "employeeCode": "PGLME2",
+      "tenantId": "pg",
+      "migratedName": "PG Last Mile Two",
+      "migratedRoles": [
+        {
+          "code": "EMPLOYEE",
+          "name": "Employee",
+          "tenantId": "pg"
+        },
+        {
+          "code": "GRO",
+          "name": "Complaint Assessor",
+          "tenantId": "pg"
+        },
+        {
+          "code": "PGR_LME",
+          "name": "Complaint Resolver",
+          "tenantId": "pg"
+        },
+        {
+          "code": "CSR",
+          "name": "Complainant",
+          "tenantId": "pg"
+        }
+      ],
+      "keycloakSub": null,
+      "source": "seed-empmap.js"
+    },
+    "58f8343a-e158-4de4-9985-693e1de93f6b": {
+      "recordedAt": "2026-09-21T03:00:49.629Z",
+      "employeeId": "1fbb0782-9b35-4177-85ec-fd3128ccb1c3",
+      "employeeCode": "PGLME3",
+      "tenantId": "pg",
+      "migratedName": "PG Last Mile Three",
+      "migratedRoles": [
+        {
+          "code": "EMPLOYEE",
+          "name": "Employee",
+          "tenantId": "pg"
+        },
+        {
+          "code": "GRO",
+          "name": "Complaint Assessor",
+          "tenantId": "pg"
+        },
+        {
+          "code": "PGR_LME",
+          "name": "Complaint Resolver",
+          "tenantId": "pg"
+        },
+        {
+          "code": "CSR",
+          "name": "Complainant",
+          "tenantId": "pg"
+        }
+      ],
+      "keycloakSub": null,
+      "source": "seed-empmap.js"
+    },
+    "745ed9f7-d1bc-4155-a3f1-1435eb5e6358": {
+      "recordedAt": "2026-09-21T03:00:49.799Z",
+      "employeeId": "b23485e3-caa7-4d8d-9928-bc6128726680",
+      "employeeCode": "PGWCSR4",
+      "tenantId": "pg",
+      "migratedName": "PG Ward CSR",
+      "migratedRoles": [
+        {
+          "code": "EMPLOYEE",
+          "name": "Employee",
+          "tenantId": "pg"
+        },
+        {
+          "code": "CSR",
+          "name": "Complainant",
+          "tenantId": "pg"
+        }
+      ],
+      "keycloakSub": null,
+      "source": "seed-empmap.js"
+    }
+  }
+}

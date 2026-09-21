@@ -179,6 +179,12 @@ const gaplog = require('../gaplog');
 // The one stateful component in the shim: the durable 2.x-uuid -> v3-individual-id
 // map. Everything this translator does with it is on the record below.
 const idmap = require('../idmap');
+// src/empmap.js - the SECOND durable map. idmap.js unblocked the citizen and
+// exposed the employee: v3 does not keep employees in the individual registry,
+// it keeps them in d3-employee (a separate service, a separate table
+// employee_v3, a separate id space). See empmap.js for why this is a parallel
+// map and not a `kind` column.
+const empmap = require('../empmap');
 
 const DEP = 'egov-user';
 
@@ -189,6 +195,23 @@ const UPDATE_2X = '/user/users/_updatenovalidate';
 
 // --- v3 ----------------------------------------------------------------
 const V3_INDIVIDUALS = '/individual/v3/individuals';
+
+// The v3 EMPLOYEE registry. Note the absolute base: v3's own Kong has NO route
+// for it. Verified against the live admin API on this box - 10 routes exist
+// (/keycloak /individuals /idgen /filestore /accounts /individual /mdms-v2
+// /registry /workflow /boundary) and not one of them is /employee. So the one
+// thing CCRS needs in order to name an assignee is not reachable through the
+// gateway that fronts every other v3 service, and the shim has to address the
+// container directly. That is a deployment gap in v3, not a translation
+// choice, and it is recorded as one.
+const V3_EMPLOYEE_BASE = process.env.V3_EMPLOYEE_BASE || 'http://d3-employee:8080';
+const V3_EMPLOYEES = '/employee/v3/employees';
+
+// toV3 decides that a request is about an employee; toV2 has to know that when
+// the answer comes back, and the two are separate calls with only req2x in
+// common. A WeakMap keyed by the request object carries the decision without
+// putting anything on a payload that gets re-serialised.
+const employeeRoute = new WeakMap();
 const V3_MAX_SIZE = 100; // verified: ?size=200 -> 400
 
 // v3 requires a gender and CCRS's User model has no such field.
@@ -454,6 +477,16 @@ function searchToV3(req2x) {
   const userName = typeof req2x.userName === 'string' ? req2x.userName.trim() : '';
   const mobileNumber = typeof req2x.mobileNumber === 'string' ? req2x.mobileNumber.trim() : '';
 
+  // ---- employees take a different registry entirely ----------------
+  // getFirstRoleNameByUuid (UserService:229) is the ONLY pgr-services call
+  // that asks about a user without pinning userType=CITIZEN, and it is the
+  // call that was silently answering "NA". Route it - and only it - at
+  // d3-employee. A search that pins CITIZEN is left alone even when the uuid
+  // is a known employee, because 2.x would answer that search with an empty
+  // list and so must the shim.
+  const empReq = employeeSearchToV3(req2x, uuids, tenantId);
+  if (empReq) return empReq;
+
   noteDroppedSearchFilters(req2x, tenantId);
 
   const params = [];
@@ -657,7 +690,262 @@ function noteDroppedSearchFilters(req2x, tenantId) {
   }
 }
 
+// ------------------------------------------------------- 1b. employees
+//
+// Returns a v3 request when this search is about employees, or null to leave
+// the citizen path exactly as it was.
+function employeeSearchToV3(req2x, uuids, tenantId) {
+  if (!uuids.length) return null;
+
+  // A CITIZEN-pinned search must not be answered from the employee registry.
+  // 2.x applies userType as a real filter; answering an employee here would
+  // widen the search in a way the caller cannot see.
+  const userType = typeof req2x.userType === 'string' ? req2x.userType.toUpperCase() : '';
+  if (userType === 'CITIZEN') return null;
+
+  let hits = [];
+  try {
+    hits = uuids.map((u) => ({ uuid2x: u, entry: empmap.lookup(u) }));
+  } catch (err) {
+    gaplog.record({
+      dep: DEP,
+      field: 'empmap',
+      action: 'unmapped',
+      detail:
+        `The durable 2.x-uuid -> v3-employee-id map at ${empmap.filePath()} could not be read: ` +
+        `${err.message}. Refusing to answer an employee search from a map this shim cannot parse.`,
+    });
+    throw err;
+  }
+
+  const mapped = hits.filter((h) => h.entry);
+  if (!mapped.length) {
+    // Not an employee as far as this shim knows: fall through to the
+    // individual registry, i.e. exactly the pre-empmap behaviour.
+    gaplog.record({
+      dep: DEP,
+      field: 'employee uuid -> employee.id',
+      action: 'unmapped',
+      detail:
+        `A user search with no userType asked about ${uuids.length} uuid(s) and NONE of them is ` +
+        `in the employee map (${empmap.filePath()}, ` +
+        `${(() => { try { return empmap.size(); } catch { return '?'; } })()} entries). The ` +
+        'request falls through to the v3 INDIVIDUAL registry unchanged. If the uuid really is an ' +
+        'employee, that registry has never heard of it and answers an empty list, and ' +
+        'UserService.getFirstRoleNameByUuid returns null -> ComplaintDomainEventService.' +
+        'getAssigneeName:237 stamps the literal string "NA" on the outbound domain event. ' +
+        'Nothing errors. That is the bug this map exists to close.',
+    });
+    return null;
+  }
+
+  if (mapped.length !== hits.length) {
+    gaplog.record({
+      dep: DEP,
+      field: 'employee uuid -> employee.id',
+      action: 'unmapped',
+      detail:
+        `A single user search mixed ${mapped.length} known employee uuid(s) with ` +
+        `${hits.length - mapped.length} that are not in the employee map. v3 keeps citizens and ` +
+        'employees in two different services with two different id spaces, and the ' +
+        'one-request-in / one-request-out contract cannot fan a single 2.x search out across ' +
+        'both. The shim throws rather than answering the half it can, because a partial answer ' +
+        'to a bulk user search is what makes UserService.searchBulkUser attach a null citizen to ' +
+        'a complaint with HTTP 200. 2.x had one user table and this question never arose.',
+    });
+    throw new Error(
+      `user translator: search mixed ${mapped.length} employee uuid(s) with ${hits.length - mapped.length} non-employee uuid(s); v3 splits the two registries`
+    );
+  }
+
+  if (mapped.length > 1) {
+    gaplog.record({
+      dep: DEP,
+      field: 'employee uuid[]',
+      action: 'unmapped',
+      detail:
+        `A user search asked about ${mapped.length} employees at once. The v3 employee LIST ` +
+        'endpoint cannot serve it: GET /employee/v3/employees accepts ?id=, ?code= and ?userId= ' +
+        'and IGNORES ALL THREE - verified live, each returned every employee in the tenant with ' +
+        'HTTP 200 (the same pathology the individual registry has with ?userId=). The only ' +
+        'filter the deployed build actually applies is ?isActive=. So the only way to ask about ' +
+        'one specific employee is the by-id PATH form, GET /employee/v3/employees/{id}, which is ' +
+        'one employee per request. The shim throws rather than fetching the whole tenant and ' +
+        'calling the matching subset an answer.',
+    });
+    throw new Error(
+      `user translator: ${mapped.length} employee uuids in one search; v3's employee list endpoint ignores ?id= and only the by-id path form filters`
+    );
+  }
+
+  const { uuid2x, entry } = mapped[0];
+
+  if (tenantId && entry.tenantId && entry.tenantId !== tenantId) {
+    gaplog.record({
+      dep: DEP,
+      field: 'employee uuid -> employee.id',
+      action: 'unmapped',
+      detail:
+        `The employee map holds ${uuid2x} under tenant ${JSON.stringify(entry.tenantId)} but the ` +
+        `search arrived for tenant ${JSON.stringify(tenantId)}. The entry is NOT used. ` +
+        'getFirstRoleNameByUuid searches at the STATE-level tenant ' +
+        '(UserUtils.getStateLevelTenant), while d3-employee resolves strictly on X-Tenant-ID and ' +
+        'returns [] for any other tenant (verified: asking for a `pg` employee as `mz` answers ' +
+        '[]). 2.x resolves an employee at state level and reads their assignments per city; v3 ' +
+        'has no state level at all.',
+    });
+    return null;
+  }
+
+  gaplog.record({
+    dep: DEP,
+    field: 'employee uuid -> employee.id',
+    action: 'faked',
+    detail:
+      `Translated the 2.x egov-user uuid ${uuid2x} into the v3 employee id ${entry.employeeId} ` +
+      `(code ${JSON.stringify(entry.employeeCode || null)}) using the shim's durable employee ` +
+      `map (${empmap.filePath()}, recorded ${entry.recordedAt} by ${entry.source || 'unknown'}). ` +
+      'As with the individual map, THIS CORRESPONDENCE EXISTS NOWHERE ELSE - employee_v3 has a ' +
+      '`user_id` column that could have held it, but the search filter for it is ignored, so the ' +
+      'registry cannot be asked the question even when it holds the answer.',
+  });
+
+  employeeRoute.set(req2x, { uuid2x, entry });
+  return {
+    method: 'GET',
+    // The by-id PATH form. Absolute, because v3's Kong has no /employee route.
+    path: `${V3_EMPLOYEE_BASE}${V3_EMPLOYEES}/${encodeURIComponent(entry.employeeId)}`,
+    headers: authHeaders(req2x, tenantId),
+  };
+}
+
+// v3 Employee -> 2.x User. Deliberately NARROW: an employee record in DIGIT 3.0
+// carries id, code, userId, status, employeeType, dateOfAppointment,
+// department, designation, isActive. That is the whole payload (verified live).
+// It has no name, no mobile, no email, no tenant, no roles and no reportingTo,
+// so every one of those is either null or comes from the map, and says so.
+function employeeToV2(v3Response, req2x) {
+  const routed = employeeRoute.get(req2x);
+  const { uuid2x, entry } = routed;
+  const status = statusOf(v3Response);
+  if (status >= 400) {
+    // 404 means the map points at an employee v3 no longer has. That is not
+    // "no such user" - it is a broken map - so it stays an error.
+    return errorEnvelope(v3Response, req2x, `GET ${V3_EMPLOYEES}/{id}`);
+  }
+  const emp = bodyOf(v3Response);
+
+  gaplog.record({
+    dep: DEP,
+    field: 'Employee.name',
+    action: 'dropped',
+    detail:
+      'employee_v3 HAS NO NAME COLUMN. The v3 employee is an employment record, not a person: ' +
+      'it points at the person through `individual_id`, in the OTHER registry. Following that ' +
+      'pointer is a second HTTP call, which the shim\'s one-request-in / one-request-out contract ' +
+      'forbids, and on this box individual_id is NULL for every seeded employee anyway because ' +
+      'the migration that would create the individual has not been written. So user.name is ' +
+      (entry.migratedName
+        ? 'taken from the shim\'s employee map (recorded by the seeder from eg_user, NOT reported by v3).'
+        : 'null. 2.x answered "PG Grievance Officer" here.'),
+  });
+
+  const roles = Array.isArray(entry.migratedRoles) ? entry.migratedRoles : [];
+  if (roles.length) {
+    gaplog.record({
+      dep: DEP,
+      field: 'user.roles',
+      action: 'faked',
+      detail:
+        `Emitted ${roles.length} role(s) (${roles.map((r) => r.code).join(', ')}) from the shim's ` +
+        'employee map. THESE DID NOT COME FROM DIGIT 3.0. The v3 employee record has no roles ' +
+        'field at all; v3 keeps roles as KEYCLOAK REALM ROLES, and on this box there is exactly ' +
+        'one Keycloak user (`admin`, realm `master`) and zero tenant realms, so there is nowhere ' +
+        'to read them from. The seeder copied them out of the 2.x eg_userrole_v1 - which is ' +
+        'precisely what identity-plan task C2 (role-grant migration into realm roles) would ' +
+        'write into Keycloak. This entry exists so that a green run is not mistaken for v3 ' +
+        'having answered the question.',
+    });
+  } else {
+    gaplog.record({
+      dep: DEP,
+      field: 'user.roles',
+      action: 'unmapped',
+      detail:
+        'Emitted roles: []. The v3 employee model HAS NO ROLES - employee_v3 is (id, code, ' +
+        'user_id, individual_id, status, employee_type, date_of_appointment, department, ' +
+        'designation, is_active, tenant_id) and nothing else. Roles in DIGIT 3.0 are Keycloak ' +
+        'realm roles. The consequence is exact and observable: ' +
+        'UserService.getFirstRoleNameByUuid:242 does roles.get(0).getName() on an empty list, ' +
+        'returns null, and ComplaintDomainEventService.getAssigneeName:237 falls back to the ' +
+        'literal string "NA". Resolving the employee\'s IDENTITY does not resolve the assignee; ' +
+        'only migrating ROLES into Keycloak does.',
+    });
+  }
+
+  gaplog.record({
+    dep: DEP,
+    field: 'Employee.reportingTo',
+    action: 'unmapped',
+    detail:
+      'The v3 employee model has NO reportingTo / supervisor field, and no assignment history: ' +
+      'department and designation are single columns on the employee row, not a list of ' +
+      'assignments with dates. CCRS\'s escalation walks the 2.x HRMS reportingTo chain ' +
+      '(eg_hrms_assignment.reportingto) to find the next officer up. There is nothing in v3 to ' +
+      'walk. This is reported once per employee lookup so the count in the gap log is the number ' +
+      'of times an escalation decision would have had no data.',
+  });
+
+  gaplog.record({
+    dep: DEP,
+    field: 'user.tenantId',
+    action: 'defaulted',
+    detail:
+      `Emitted tenantId=${JSON.stringify(entry.tenantId || null)} from the employee map. GET ` +
+      `${V3_EMPLOYEES}/{id} answers WITHOUT a tenantId field - the tenant is an inbound header ` +
+      'only and is never echoed - so this is the shim reporting the question as the answer.',
+  });
+
+  gaplog.record({
+    dep: DEP,
+    field: 'user.type',
+    action: 'faked',
+    detail:
+      'Emitted type="EMPLOYEE". v3 has no user type anywhere: the distinction between a citizen ' +
+      'and an employee in DIGIT 3.0 is which REGISTRY the record lives in (individual vs ' +
+      'employee) plus a Keycloak realm role. The shim knows it queried the employee registry, so ' +
+      'this one is sound by construction - but it is asserted by the shim, not reported by v3.',
+  });
+
+  const user = {
+    id: null,
+    uuid: uuid2x, // restored: CCRS keys everything off its own uuid
+    userName: typeof emp.code === 'string' ? emp.code : null,
+    name: entry.migratedName === undefined ? null : entry.migratedName,
+    type: 'EMPLOYEE',
+    mobileNumber: null,
+    emailId: null,
+    roles,
+    tenantId: entry.tenantId || null,
+    active: emp.isActive === undefined ? true : !!emp.isActive,
+    // Mandatory: UserUtils.parseResponse:79 parses this with no null check and
+    // NPEs on a missing value. v3's employee record has no created timestamp in
+    // its response, only dateOfAppointment, so that is what this is derived
+    // from - a different fact wearing the same name.
+    createdDate: formatDate2x(Date.parse(emp.dateOfAppointment) || Date.now()),
+  };
+
+  return {
+    responseInfo: responseInfo(req2x, `GET ${V3_EMPLOYEES}/{id}`),
+    user: [user],
+  };
+}
+
 function searchToV2(v3Response, req2x) {
+  // Routed at d3-employee by employeeSearchToV3: a completely different
+  // registry with a completely different payload.
+  if (employeeRoute.has(req2x)) return employeeToV2(v3Response, req2x);
+
   const status = statusOf(v3Response);
   if (status >= 400) return errorEnvelope(v3Response, req2x, 'GET /individual/v3/individuals');
 
@@ -1193,6 +1481,9 @@ function withHint(req2x, hint) {
 }
 
 module.exports = {
+  employeeSearchToV3,
+  employeeToV2,
+
   toV3,
   toV2,
   dep: DEP,

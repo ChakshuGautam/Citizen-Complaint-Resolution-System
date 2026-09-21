@@ -16,6 +16,14 @@ process.env.GAP_LOG = process.env.GAP_LOG || '/tmp/idmap-test-gaps.jsonl';
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'idmap-test-'));
 const mapFile = path.join(dir, 'idmap.json');
 process.env.ID_MAP = mapFile;
+// Pin the EMPLOYEE map to an empty temp file too. These tests are about the
+// individual map alone, and without this they read the box's real
+// /opt/hybrid-shim/state/empmap.json - which now holds the GRO, so the
+// "unmapped uuid" case below would silently become an employee-routed one and
+// assert against the wrong registry. Same isolation ID_MAP already has.
+const empMapFile = path.join(dir, 'empmap.json');
+fs.writeFileSync(empMapFile, JSON.stringify({ version: 1, entries: {} }));
+process.env.EMP_MAP = empMapFile;
 
 const idmap = require('../src/idmap');
 const user = require('../src/translators/user');
@@ -112,7 +120,9 @@ test('search sends the v3 individual id, not the 2.x uuid', () => {
 
 test('an unmapped uuid is passed through unchanged (pre-map behaviour preserved)', () => {
   seed();
-  const other = '21fc9b81-9e52-43a5-ac1a-00db84dc2a6a'; // the employee: never mapped
+  // The GRO. Not in the INDIVIDUAL map (and, with EMP_MAP pinned empty above,
+  // not in the employee map either), so this is the pure pass-through case.
+  const other = '21fc9b81-9e52-43a5-ac1a-00db84dc2a6a';
   const req = withShim({ uuid: [other], tenantId: 'pg', RequestInfo: { userInfo: { tenantId: 'pg', uuid: other } } }, '/user/_search');
   const v3 = user.toV3(req);
   assert.ok(v3.path.includes(`id=${other}`), `expected the raw uuid in ${v3.path}`);

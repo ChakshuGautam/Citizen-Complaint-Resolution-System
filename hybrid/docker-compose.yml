@@ -17,6 +17,14 @@ services:
       # state this shim owns. Bind-mounted so it survives a rebuild and so the
       # host-side seeder writes the same file the container reads.
       ID_MAP: "/state/idmap.json"
+      # The durable 2.x-uuid -> v3-EMPLOYEE-id map (src/empmap.js). A second
+      # file, because v3 keeps employees in d3-employee, not in the individual
+      # registry, and the two have separate id spaces.
+      EMP_MAP: "/state/empmap.json"
+      # v3's Kong has NO /employee route (10 routes, verified against its admin
+      # API, none of them employee), so the employee registry is addressed
+      # directly by container name. Every other v3 call still goes through Kong.
+      V3_EMPLOYEE_BASE: "http://d3-employee:8080"
     volumes:
       # /opt/hybrid-shim/gaps.jsonl is a symlink to ./gaps/gaps.jsonl on the host
       - ./gaps:/gaps
