@@ -17,6 +17,12 @@ import org.springframework.util.CollectionUtils;
 import org.springframework.web.util.UriComponentsBuilder;
 
 import java.util.*;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 
 import static org.egov.pgr.util.PGRConstants.*;
@@ -307,8 +313,8 @@ public class WorkflowService {
      * two-complaint employee inbox therefore comes back with one row, or none, and looks like a
      * successful search.
      *
-     * <p>Until the fan-out lands, more than one id on v3 is refused outright rather than asked for
-     * and half-answered.
+     * <p>On v3 this therefore fans out: N complaints become N single-entity calls, gathered. The
+     * comma-separated form is never sent, on either stack's behalf.
      */
     public List<ProcessInstance> searchProcessInstances(RequestInfo requestInfo, String tenantId,
                                                         List<String> serviceRequestIds) {
@@ -322,15 +328,92 @@ public class WorkflowService {
             return parseProcessInstances(result).getProcessInstances();
         }
 
-        if (serviceRequestIds.size() > 1)
-            throw new CustomException("WORKFLOW_MULTI_ENTITY_UNSUPPORTED",
-                    "Asked the workflow service for " + serviceRequestIds.size() + " complaints in one search. "
-                            + "DIGIT 3.0 GET /workflow/v3/transition serves exactly one entityId - the comma form "
-                            + "answers totalCount 0 and the repeated form honours only the first value, both with "
-                            + "HTTP 200. Refusing to send it: a short list here is an employee inbox missing "
-                            + "complaints with no error anywhere.");
+        if (serviceRequestIds.size() == 1)
+            return searchProcessInstancesV3(requestInfo, tenantId, serviceRequestIds.get(0), null, false);
 
-        return searchProcessInstancesV3(requestInfo, tenantId, serviceRequestIds.get(0), null, false);
+        return fanOutProcessInstanceSearch(requestInfo, tenantId, serviceRequestIds);
+    }
+
+    /**
+     * N complaints, N single-entity v3 calls, gathered.
+     *
+     * <p>This is the one place being a BFF beats being a shim. A translator is one request in and
+     * one request out, so it could only forward the comma-separated {@code businessIds} 2.x sends
+     * and let v3 answer {@code totalCount 0} - which CCRS then reported as WORKFLOW_NOT_FOUND, an
+     * employee inbox holding two or more complaints simply failing. pgr-services can make N calls.
+     *
+     * <p>What this costs is not hidden: a 25-complaint inbox page is 25 requests to the workflow
+     * service where 2.x made 1. The concurrency and the overall timeout are configurable
+     * ({@code egov.workflow.v3.fanout.threads}, {@code .timeout.seconds}) because nothing in this
+     * migration has measured v3 under concurrency; the honest position is that this is a knob, not
+     * a tuned constant. The real fix is a v3 search that accepts more than one entityId.
+     *
+     * <p>Every failure mode here is loud. One call failing fails the whole join rather than
+     * yielding a short list - a partially-enriched inbox would be a page of complaints at HTTP 200
+     * with some of them silently missing their workflow, which is precisely the failure shape this
+     * migration exists to stop. An id that simply has no workflow contributes no row, and
+     * {@link #enrichWorkflow}'s count check then raises WORKFLOW_NOT_FOUND, exactly as it does on
+     * 2.x.
+     *
+     * <p>Results are returned in the order the ids were asked for, so the join is deterministic.
+     */
+    private List<ProcessInstance> fanOutProcessInstanceSearch(RequestInfo requestInfo, String tenantId,
+                                                              List<String> serviceRequestIds) {
+        int threads = Math.max(1, Math.min(fanoutThreads(), serviceRequestIds.size()));
+        ExecutorService executor = Executors.newFixedThreadPool(threads, runnable -> {
+            Thread thread = new Thread(runnable, "wf-v3-fanout");
+            thread.setDaemon(true);
+            return thread;
+        });
+
+        try {
+            List<Future<List<ProcessInstance>>> futures = new ArrayList<>(serviceRequestIds.size());
+            for (String serviceRequestId : serviceRequestIds)
+                futures.add(executor.submit(() ->
+                        searchProcessInstancesV3(requestInfo, tenantId, serviceRequestId, null, false)));
+
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(fanoutTimeoutSeconds());
+            List<ProcessInstance> gathered = new ArrayList<>();
+            for (int i = 0; i < futures.size(); i++) {
+                try {
+                    long remaining = deadline - System.nanoTime();
+                    gathered.addAll(futures.get(i).get(Math.max(remaining, 0L), TimeUnit.NANOSECONDS));
+                } catch (TimeoutException e) {
+                    throw new CustomException("WORKFLOW_FANOUT_TIMEOUT",
+                            "Timed out joining " + serviceRequestIds.size() + " complaints to their workflows. "
+                                    + "DIGIT 3.0 serves one entityId per call, so this search is "
+                                    + serviceRequestIds.size() + " requests where 2.x made one; it gave up after "
+                                    + fanoutTimeoutSeconds() + "s with " + gathered.size() + " answered. Returning a "
+                                    + "partial inbox would be worse than failing.");
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new CustomException("WORKFLOW_FANOUT_INTERRUPTED",
+                            "Interrupted joining complaint " + serviceRequestIds.get(i) + " to its workflow");
+                } catch (ExecutionException e) {
+                    Throwable cause = e.getCause();
+                    // Rethrown untouched where possible: ServiceCallException keeps its text in
+                    // getError() and CustomException in getCode(), and re-wrapping either discards
+                    // the only diagnosis there is.
+                    if (cause instanceof RuntimeException)
+                        throw (RuntimeException) cause;
+                    throw new CustomException("WORKFLOW_NOT_FOUND",
+                            "Failed to join complaint " + serviceRequestIds.get(i) + " to its workflow: " + cause);
+                }
+            }
+            return gathered;
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    private int fanoutThreads() {
+        Integer configured = pgrConfiguration.getWorkflowV3FanoutThreads();
+        return configured == null || configured < 1 ? 1 : configured;
+    }
+
+    private int fanoutTimeoutSeconds() {
+        Integer configured = pgrConfiguration.getWorkflowV3FanoutTimeoutSeconds();
+        return configured == null || configured < 1 ? 30 : configured;
     }
 
     /**

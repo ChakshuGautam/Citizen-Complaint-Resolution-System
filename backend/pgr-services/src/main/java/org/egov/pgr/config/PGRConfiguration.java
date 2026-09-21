@@ -495,6 +495,22 @@ public class PGRConfiguration {
     @Value("${egov.workflow.v3.max.pages:50}")
     private Integer workflowV3MaxPages;
 
+    /**
+     * How many of the N single-entity workflow calls an inbox page fans out to may be in flight at
+     * once.
+     *
+     * <p>2.x answered a whole inbox page in ONE call; v3 serves one entityId per call, so a
+     * 25-complaint page is 25 requests against the workflow service where it used to be 1. That is
+     * a real load and latency decision and nothing in this migration has measured v3 under
+     * concurrency, so it is a knob rather than a constant. 1 makes the fan-out sequential.
+     */
+    @Value("${egov.workflow.v3.fanout.threads:8}")
+    private Integer workflowV3FanoutThreads;
+
+    /** How long the whole fan-out may take before it is abandoned and reported. */
+    @Value("${egov.workflow.v3.fanout.timeout.seconds:30}")
+    private Integer workflowV3FanoutTimeoutSeconds;
+
     @Value("${egov.workflow.v3.processdefinition.search.path:/workflow/v3/process/definition}")
     private String workflowV3ProcessDefinitionSearchPath;
 

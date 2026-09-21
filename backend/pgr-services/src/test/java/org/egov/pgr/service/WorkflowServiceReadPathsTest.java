@@ -236,17 +236,26 @@ class WorkflowServiceReadPathsTest {
     }
 
     @Test
-    @DisplayName("v3: TWO complaints are refused outright — no call is made and no short list is returned")
-    void v3RefusesAMultiComplaintInbox() {
+    @DisplayName("v3: TWO complaints become TWO single-entity calls — the comma form is never sent")
+    void v3FansOutAMultiComplaintInbox() {
         flipToV3();
-        // No server.expect at all: the point is that nothing goes on the wire. v3 answers the
-        // comma form with totalCount 0 and the repeated form with only the first id, both at
-        // HTTP 200, so ASKING is how an employee inbox loses complaints silently.
-        CustomException thrown = assertThrows(CustomException.class,
-                () -> workflowService.searchProcessInstances(requestInfo(), TENANT, List.of(ID_A, ID_B)));
+        // v3 answers ?entityId=a,b with totalCount 0 and ?entityId=a&entityId=b with only the
+        // first id, both at HTTP 200, so ASKING for two in one call is how an employee inbox
+        // loses complaints silently. One call per complaint, and both must come back.
+        server.expect(requestTo(allOf(containsString("entityId=" + ID_A), not(containsString(",")))))
+                .andExpect(method(HttpMethod.GET))
+                .andRespond(withSuccess("{\"totalCount\":1,\"processInstances\":["
+                        + processRow(ID_A, "APPLY", "PENDINGFORASSIGNMENT") + "]}", MediaType.APPLICATION_JSON));
+        server.expect(requestTo(allOf(containsString("entityId=" + ID_B), not(containsString(",")))))
+                .andExpect(method(HttpMethod.GET))
+                .andRespond(withSuccess("{\"totalCount\":1,\"processInstances\":["
+                        + processRow(ID_B, "ASSIGN", "PENDINGATLME") + "]}", MediaType.APPLICATION_JSON));
 
-        assertEquals("WORKFLOW_MULTI_ENTITY_UNSUPPORTED", thrown.getCode());
+        List<ProcessInstance> out = workflowService.searchProcessInstances(requestInfo(), TENANT, List.of(ID_A, ID_B));
         server.verify();
+
+        assertEquals(List.of(ID_A, ID_B),
+                List.of(out.get(0).getBusinessId(), out.get(1).getBusinessId()));
     }
 
     @Test
