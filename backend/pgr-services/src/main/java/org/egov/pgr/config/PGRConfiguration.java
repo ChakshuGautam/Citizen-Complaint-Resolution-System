@@ -511,6 +511,22 @@ public class PGRConfiguration {
     @Value("${egov.workflow.v3.fanout.timeout.seconds:30}")
     private Integer workflowV3FanoutTimeoutSeconds;
 
+    /**
+     * The actions DIGIT 3.0 stores on the PGR process definition and then refuses to perform.
+     *
+     * <p>CCRS models COMMENT and ESCALATE as SELF-LOOPS ({@code nextState == currentState}). v3
+     * accepts both at registration and answers every attempt at runtime with
+     * {@code 409 "Process instance is no longer in the expected state: invalid state transition: no
+     * transition"} - verified on the live stack, twice, with the registered PGR definition. The
+     * rows exist in the v3 database: COMMENT at PENDINGATLME, PENDINGFORASSIGNMENT,
+     * PENDINGFORREASSIGNMENT, REJECTED and RESOLVED; ESCALATE at PENDINGATLME.
+     *
+     * <p>Configurable rather than hardcoded so that a v3 build which starts supporting self-loops
+     * can be adopted by emptying this list, without a code change.
+     */
+    @Value("${egov.workflow.v3.unsupported.actions:COMMENT,ESCALATE}")
+    private String workflowV3UnsupportedActions;
+
     @Value("${egov.workflow.v3.processdefinition.search.path:/workflow/v3/process/definition}")
     private String workflowV3ProcessDefinitionSearchPath;
 

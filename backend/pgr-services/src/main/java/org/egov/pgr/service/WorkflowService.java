@@ -11,6 +11,7 @@ import org.egov.pgr.web.models.*;
 import org.egov.pgr.web.models.workflow.*;
 import org.egov.pgr.workflow.WorkflowV3Mapper;
 import org.egov.tracer.model.CustomException;
+import org.egov.tracer.model.ServiceCallException;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpMethod;
 import org.springframework.util.CollectionUtils;
@@ -157,6 +158,12 @@ public class WorkflowService {
      *
      * */
     public String updateWorkflowStatus(ServiceRequest serviceRequest) {
+        // Before ANY call. Resolving the business service first and only then discovering that the
+        // action cannot be performed would spend a round trip to reach the same refusal.
+        if (pgrConfiguration.isWorkflowV3() && serviceRequest.getWorkflow() != null)
+            refuseIfUnsupportedOnV3(serviceRequest.getWorkflow().getAction(),
+                    serviceRequest.getService() == null ? null : serviceRequest.getService().getServiceRequestId());
+
         ProcessInstance processInstance = getProcessInstanceForPGR(serviceRequest);
         ProcessInstanceRequest workflowRequest = new ProcessInstanceRequest(serviceRequest.getRequestInfo(), Collections.singletonList(processInstance));
         ProcessInstanceResponse response = callWorkFlow(workflowRequest);
@@ -405,6 +412,79 @@ public class WorkflowService {
         } finally {
             executor.shutdownNow();
         }
+    }
+
+    // ------------------------------------------------------------------ actions v3 cannot perform
+
+    /**
+     * Refuses an action DIGIT 3.0 stores and will not perform.
+     *
+     * <p><b>The decision, stated once.</b> CCRS models COMMENT and ESCALATE as self-loops
+     * ({@code nextState == currentState}). v3 accepts both at registration and answers every
+     * attempt with 409 "invalid state transition: no transition". Three options were on the table:
+     *
+     * <ul>
+     *   <li><b>Degrade</b> - keep accepting the action and quietly do nothing, or keep only the
+     *       comments that ride a real state change. Rejected. A citizen's comment accepted at HTTP
+     *       200 and silently discarded is the exact failure shape this migration exists to stop,
+     *       and it would be invisible in every log and every test.</li>
+     *   <li><b>Keep it on 2.x</b> - route these two actions to the old workflow service while the
+     *       rest goes to v3. Rejected. There is one process instance per complaint and it lives in
+     *       one engine; a comment written into the 2.x store for a complaint whose state machine is
+     *       in v3 is a split brain, not a fallback.</li>
+     *   <li><b>Fail loudly</b> - chosen. When the workflow dependency is on v3, CCRS refuses the
+     *       action at its own boundary, before the call, with an error that names the action, the
+     *       complaint, the reason and the way out. The citizen or employee is told their comment
+     *       was not recorded, which is true, instead of being told it was, which is not.</li>
+     * </ul>
+     *
+     * <p>This is a deliberate, visible product regression on the v3 flag, and it is the honest
+     * shape of the underlying fact: standalone citizen commenting is a CCRS product feature that
+     * should never have been modelled as a workflow self-loop. Owning it - a CCRS comment table
+     * and endpoint, independent of the workflow engine - is the real fix and is a separate piece of
+     * work. Until then the flag makes the loss explicit rather than silent, and emptying
+     * {@code egov.workflow.v3.unsupported.actions} adopts a v3 build that starts supporting
+     * self-loops with no code change.
+     *
+     * <p>ESCALATE is dead twice over: even with self-loops working, CCRS escalation re-targets the
+     * complaint to the current assignee's {@code reportingTo}, and v3's employee registry has no
+     * supervisor column at all. See EscalationScheduler, which refuses to sweep on v3.
+     */
+    private void refuseIfUnsupportedOnV3(String action, String businessId) {
+        if (action == null || !unsupportedV3Actions().contains(action.trim().toUpperCase(Locale.ROOT)))
+            return;
+        throw unsupportedActionOnV3(action, businessId,
+                "v3 stores this action on the process definition and refuses it at runtime, because CCRS models "
+                        + "it as a self-loop (nextState == currentState) and the DIGIT 3.0 engine has no such "
+                        + "transition");
+    }
+
+    private CustomException unsupportedActionOnV3(String action, String businessId, String reason) {
+        return new CustomException("WORKFLOW_ACTION_UNSUPPORTED_ON_V3",
+                "The action " + action + " cannot be performed on complaint " + businessId
+                        + " while the workflow dependency is on DIGIT 3.0: " + reason
+                        + ". Nothing was recorded. This is refused here rather than attempted and swallowed, because "
+                        + "an action accepted at HTTP 200 and silently discarded is worse than one that fails. To "
+                        + "restore it: set egov.workflow.api.version=2.x, or have CCRS own the feature outside the "
+                        + "workflow engine, or clear egov.workflow.v3.unsupported.actions once a v3 build supports "
+                        + "self-loop transitions.");
+    }
+
+    /** v3's refusal of a self-loop, as the live build words it. */
+    private static boolean isSelfLoopRefusal(ServiceCallException e) {
+        String error = e.getError();
+        return error != null && error.contains("409") && error.contains("invalid state transition");
+    }
+
+    private Set<String> unsupportedV3Actions() {
+        String configured = pgrConfiguration.getWorkflowV3UnsupportedActions();
+        if (configured == null || configured.trim().isEmpty())
+            return Collections.emptySet();
+        Set<String> actions = new HashSet<>();
+        for (String action : configured.split(","))
+            if (!action.trim().isEmpty())
+                actions.add(action.trim().toUpperCase(Locale.ROOT));
+        return actions;
     }
 
     private int fanoutThreads() {
@@ -685,6 +765,7 @@ public class WorkflowService {
                             + "not with no way to tell which.");
 
         ProcessInstance processInstance = processInstances.get(0);
+        refuseIfUnsupportedOnV3(processInstance.getAction(), processInstance.getBusinessId());
         RequestInfo requestInfo = workflowReq.getRequestInfo();
         String tenantId = V3Headers.workflowTenant(requestInfo, null, processInstance.getTenantId());
         String which = "POST " + pgrConfiguration.getWorkflowV3TransitionPath();
@@ -721,9 +802,20 @@ public class WorkflowService {
                             + "is every PGR action - will be answered 403 Forbidden.",
                     processInstance.getBusinessId(), processInstance.getAction());
 
-        Map<?, ?> response = repository.exchange(HttpMethod.POST,
-                joinUrl(pgrConfiguration.getWorkflowV3Host(), pgrConfiguration.getWorkflowV3TransitionPath()),
-                body, headers, Map.class);
+        Map<?, ?> response;
+        try {
+            response = repository.exchange(HttpMethod.POST,
+                    joinUrl(pgrConfiguration.getWorkflowV3Host(), pgrConfiguration.getWorkflowV3TransitionPath()),
+                    body, headers, Map.class);
+        } catch (ServiceCallException e) {
+            // A self-loop this build refuses that the configured list did not predict - a process
+            // definition edited later, or a different module's definition. Same diagnosis, same
+            // error code, rather than a bare transport failure nobody can read.
+            if (isSelfLoopRefusal(e))
+                throw unsupportedActionOnV3(processInstance.getAction(), processInstance.getBusinessId(),
+                        "v3 refused it at runtime: " + e.getError());
+            throw e;
+        }
 
         if (response == null)
             throw new CustomException("WORKFLOW_RESPONSE_UNREADABLE",

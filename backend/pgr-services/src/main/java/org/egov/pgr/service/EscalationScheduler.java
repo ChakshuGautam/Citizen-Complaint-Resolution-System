@@ -56,6 +56,30 @@ public class EscalationScheduler {
             return;
         }
 
+        if (config.isWorkflowV3()) {
+            // Refused as a whole rather than per complaint. Automatic escalation cannot work on
+            // DIGIT 3.0 for two independent reasons, and neither is a mapping problem:
+            //
+            //   1. ESCALATE is a SELF-LOOP in the PGR definition. v3 stores it and answers every
+            //      attempt 409 "invalid state transition: no transition".
+            //   2. Escalation re-targets the complaint to the current assignee's reportingTo, and
+            //      v3's employee registry has no supervisor column at all - no such field exists
+            //      in any v3 employee request or response, and inventing one would route a real
+            //      citizen's complaint to the wrong person, silently.
+            //
+            // Letting the sweep run would mean a 409 per eligible complaint on every tick, each
+            // one caught and logged by the per-complaint handler below, and a scan that reports
+            // "escalated=0" as though nothing were due. One ERROR naming the fact is more useful
+            // and far harder to miss.
+            log.error("Automatic escalation is enabled (pgr.escalation.enabled=true) but the workflow dependency "
+                    + "is on DIGIT 3.0, which cannot perform ESCALATE: it is a self-loop action, which v3 stores "
+                    + "and then refuses at runtime with 409 'invalid state transition: no transition', and v3's "
+                    + "employee registry has no reportingTo to re-target the complaint to. SKIPPING the escalation "
+                    + "scan entirely. Set pgr.escalation.enabled=false to make this an accepted, recorded "
+                    + "capability loss, or keep egov.workflow.api.version=2.x.");
+            return;
+        }
+
         String tenantId = getStateLevelTenantId();
         if (tenantId == null) {
             log.warn("Cannot determine state-level tenant ID; skipping escalation scan");
