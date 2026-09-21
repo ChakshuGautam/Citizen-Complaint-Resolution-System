@@ -274,8 +274,7 @@ public class EscalationService {
 
     private int workflowEscalationCount(String serviceRequestId, String tenantId,
                                         RequestInfo requestInfo, long windowStartedAt) {
-        StringBuilder url = workflowService.getprocessInstanceSearchURL(tenantId, serviceRequestId);
-        url.append("&history=true");
+        StringBuilder url = workflowService.getProcessInstanceHistorySearchURL(tenantId, serviceRequestId);
         RequestInfoWrapper wrapper = RequestInfoWrapper.builder().requestInfo(requestInfo).build();
         Object result = serviceRequestRepository.fetchResult(url, wrapper);
         try {

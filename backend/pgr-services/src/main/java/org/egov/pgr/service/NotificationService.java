@@ -660,8 +660,7 @@ public class NotificationService {
         requestInfo.setUserInfo(userInfo);
 
         RequestInfoWrapper requestInfoWrapper = RequestInfoWrapper.builder().requestInfo(requestInfo).build();
-        StringBuilder URL = workflowService.getprocessInstanceSearchURL(tenantId,serviceRequestId);
-        URL.append("&").append("history=true");
+        StringBuilder URL = workflowService.getProcessInstanceHistorySearchURL(tenantId, serviceRequestId);
 
         Object result = serviceRequestRepository.fetchResult(URL, requestInfoWrapper);
         ProcessInstanceResponse processInstanceResponse = null;
