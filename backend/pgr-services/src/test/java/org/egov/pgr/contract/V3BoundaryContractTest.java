@@ -10,7 +10,6 @@ import org.egov.pgr.web.models.Boundary;
 import org.egov.pgr.web.models.Service;
 import org.egov.pgr.web.models.ServiceRequest;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
@@ -42,7 +41,7 @@ class V3BoundaryContractTest extends V3ContractTestSupport {
     void wireCallers() {
         validator = new ServiceRequestValidator(config, mock(PGRRepository.class), mock(HRMSUtil.class),
                 serviceRequestRepository, objectMapper, mock(MDMSUtils.class));
-        expander = new BoundaryHierarchyExpander(config, restTemplate, objectMapper);
+        expander = new BoundaryHierarchyExpander(config, restTemplate, objectMapper, serviceRequestRepository);
     }
 
     private ServiceRequest requestForLocality(String localityCode) {
@@ -82,7 +81,6 @@ class V3BoundaryContractTest extends V3ContractTestSupport {
     }
 
     @Test
-    @Disabled("Enabled by C8 — feat(boundary): move relationship expansion to GET /boundary/v3/relationship")
     void boundaryRelationshipExpansionIsAGetAndReadsTheLowercaseEnvelopeKey() {
         server.expect(requestTo(allOf(
                         startsWith("http://localhost:8081/boundary/v3/relationship?"),
