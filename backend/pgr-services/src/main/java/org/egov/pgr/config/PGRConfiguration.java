@@ -482,6 +482,19 @@ public class PGRConfiguration {
     @Value("${egov.workflow.v3.transition.path:/workflow/v3/transition}")
     private String workflowV3TransitionPath;
 
+    /**
+     * How many pages of a v3 workflow list CCRS will walk before it gives up and says so.
+     *
+     * <p>v3 pages every list endpoint, defaults {@code size} to 20 and refuses {@code size} above
+     * 100, so an unbounded loop is the only way to be sure of a complete answer and an unbounded
+     * loop against a service that keeps reporting a larger totalCount is a way to hang an inbox
+     * render. At the default this is 5,000 rows, which is far past any real complaint history or
+     * assignee inbox; hitting it raises WORKFLOW_RESULT_TRUNCATED rather than returning what was
+     * collected.
+     */
+    @Value("${egov.workflow.v3.max.pages:50}")
+    private Integer workflowV3MaxPages;
+
     @Value("${egov.workflow.v3.processdefinition.search.path:/workflow/v3/process/definition}")
     private String workflowV3ProcessDefinitionSearchPath;
 

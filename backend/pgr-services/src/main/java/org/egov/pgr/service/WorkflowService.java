@@ -44,6 +44,9 @@ import static org.egov.pgr.util.PGRConstants.*;
 @org.springframework.stereotype.Service
 public class WorkflowService {
 
+    /** v3 answers 400 "size must be an integer between 1 and 100" outside this range. */
+    private static final int V3_MAX_PAGE_SIZE = 100;
+
     private PGRConfiguration pgrConfiguration;
 
     private ServiceRequestRepository repository;
@@ -379,31 +382,74 @@ public class WorkflowService {
                     "No acting user uuid to put in X-User-ID. DIGIT 3.0 " + which + " answers 400 "
                             + "\"X-User-Id header is required\" without it, so the call cannot be made.");
 
-        UriComponentsBuilder uri = UriComponentsBuilder
-                .fromHttpUrl(joinUrl(pgrConfiguration.getWorkflowV3Host(), pgrConfiguration.getWorkflowV3TransitionPath()))
-                .queryParam("processCode", PGR_BUSINESSSERVICE);
-        if (!StringUtils.isEmpty(entityId))
-            uri.queryParam("entityId", entityId);
-        if (!StringUtils.isEmpty(assigneeUuid))
-            uri.queryParam("assignee", assigneeUuid);
-        if (history)
-            uri.queryParam("history", "true");
-        uri.queryParam("size", pgrConfiguration.getV3PageMaxSize());
-
         Map<String, String> headers = V3Headers.forTenant(workflowTenant(requestInfo, tenantId))
                 .withUserFrom(requestInfo)
                 .build();
 
-        Map<?, ?> body = repository.exchange(HttpMethod.GET, uri.encode().toUriString(), null, headers, Map.class);
+        int size = pageSize();
+        int maxPages = maxPages();
+        List<Map<String, Object>> rows = new ArrayList<>();
+        Long totalCount = null;
 
-        List<Map<String, Object>> rows = v3Mapper.rowsOf(body, WorkflowV3Mapper.PROCESS_INSTANCES_KEY, which);
-        v3Mapper.assertNotTruncated(v3Mapper.totalCountOf(body), rows.size(), which);
+        for (int page = 0; page < maxPages; page++) {
+            UriComponentsBuilder uri = UriComponentsBuilder
+                    .fromHttpUrl(joinUrl(pgrConfiguration.getWorkflowV3Host(), pgrConfiguration.getWorkflowV3TransitionPath()))
+                    .queryParam("processCode", PGR_BUSINESSSERVICE);
+            if (!StringUtils.isEmpty(entityId))
+                uri.queryParam("entityId", entityId);
+            if (!StringUtils.isEmpty(assigneeUuid))
+                uri.queryParam("assignee", assigneeUuid);
+            if (history)
+                uri.queryParam("history", "true");
+            uri.queryParam("size", size);
+            uri.queryParam("page", page);
+
+            Map<?, ?> body = repository.exchange(HttpMethod.GET, uri.encode().toUriString(), null, headers, Map.class);
+
+            List<Map<String, Object>> pageRows = v3Mapper.rowsOf(body, WorkflowV3Mapper.PROCESS_INSTANCES_KEY, which);
+            totalCount = v3Mapper.totalCountOf(body);
+            rows.addAll(pageRows);
+
+            // Stop on the first short or empty page. v3 answers a page past the end with an empty
+            // list and the same totalCount, so a page that came back short cannot be followed by a
+            // full one; continuing would be an extra round trip per call for nothing.
+            if (pageRows.size() < size)
+                break;
+            if (totalCount != null && rows.size() >= totalCount)
+                break;
+        }
+
+        // Either v3 said there were more than CCRS collected, or the page bound was reached with
+        // work left. Both are reported rather than returned: the 2.x envelope has no field for
+        // "there was more", so a short list here is indistinguishable from a complete one, and the
+        // two callers that hurt most are an assignee inbox losing every complaint past the cap and
+        // a >100-transition history making getEmployeeName resolve the wrong assignee.
+        v3Mapper.assertNotTruncated(totalCount, rows.size(), which);
 
         List<ProcessInstance> processInstances = new ArrayList<>();
         for (Map<String, Object> row : rows)
             processInstances.add(v3Mapper.processInstance(row, tenantId, PGR_BUSINESSSERVICE,
                     PGR_MODULENAME, V3Headers.userIdOf(requestInfo), which));
         return processInstances;
+    }
+
+    /**
+     * v3's page size, clamped into the range it actually accepts.
+     *
+     * <p>Measured 2026-09-21: {@code size=0} and {@code size=101} are both answered 400 "size must
+     * be an integer between 1 and 100", and omitting it silently gives 20 - which is the more
+     * dangerous of the two, because 20 rows of a longer history look exactly like a complete
+     * answer. It is always sent.
+     */
+    private int pageSize() {
+        Integer configured = pgrConfiguration.getV3PageMaxSize();
+        int size = configured == null ? V3_MAX_PAGE_SIZE : configured;
+        return Math.min(Math.max(size, 1), V3_MAX_PAGE_SIZE);
+    }
+
+    private int maxPages() {
+        Integer configured = pgrConfiguration.getWorkflowV3MaxPages();
+        return configured == null || configured < 1 ? 1 : configured;
     }
 
     /** workflow tenancy: the tenant the caller named, then the acting user's. */
