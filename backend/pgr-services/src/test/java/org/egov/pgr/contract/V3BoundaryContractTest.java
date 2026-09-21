@@ -21,6 +21,7 @@ import static org.hamcrest.Matchers.allOf;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.startsWith;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.mock;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.content;
@@ -59,7 +60,6 @@ class V3BoundaryContractTest extends V3ContractTestSupport {
     }
 
     @Test
-    @Disabled("Enabled by C7 — feat(boundary): move the existence check to GET /boundary/v3/boundaries")
     void boundaryExistenceCheckIsAGetOnCodesWithTheTenantInAHeader() {
         server.expect(requestTo(allOf(
                         startsWith("http://localhost:8081/boundary/v3/boundaries?"),
@@ -73,7 +73,12 @@ class V3BoundaryContractTest extends V3ContractTestSupport {
                 .andRespond(withSuccess("{\"boundary\":[{\"id\":\"b1\",\"tenantId\":\"ke.bomet\",\"code\":\"LOC001\",\"additionalAttributes\":null,\"auditDetails\":{\"createdBy\":\"sys\",\"modifiedBy\":\"sys\",\"createdTime\":1695000000000,\"modifiedTime\":1695000000000}}]}",
                         MediaType.APPLICATION_JSON));
 
-        assertingOnlyTheRequest(() -> validator.validateBoundary(requestForLocality("LOC001")));
+        // C7 made the response half real too, so this asserts the OUTCOME, not just the request.
+        // A v3 reply CCRS cannot read binds to a BoundaryResponse with a null list and throws
+        // nothing on the way - it surfaces only as INVALID_BOUNDARY_CODE on a boundary that is
+        // perfectly valid, i.e. as a citizen unable to file a complaint.
+        assertDoesNotThrow(() -> validator.validateBoundary(requestForLocality("LOC001")));
+        server.verify();
     }
 
     @Test

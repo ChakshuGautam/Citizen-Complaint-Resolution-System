@@ -9,13 +9,16 @@ import org.egov.pgr.repository.PGRRepository;
 import org.egov.pgr.repository.ServiceRequestRepository;
 import org.egov.pgr.util.HRMSUtil;
 import org.egov.pgr.util.MDMSUtils;
+import org.egov.pgr.util.V3Headers;
 import org.egov.pgr.web.models.*;
 import org.egov.pgr.web.models.boundary.Boundary;
 import org.egov.pgr.web.models.boundary.BoundaryResponse;
 import org.egov.tracer.model.CustomException;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpMethod;
 import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
+import org.springframework.web.util.UriComponentsBuilder;
 
 import java.util.*;
 import java.util.stream.Collectors;
@@ -354,7 +357,9 @@ public class ServiceRequestValidator {
         String localityCode = request.getService().getAddress().getLocality().getCode();
 
         try {
-            Object rawResponse = serviceRequestRepository.fetchResult(
+            Object rawResponse = config.isBoundaryV3()
+                    ? searchBoundaryV3(request, localityCode)
+                    : serviceRequestRepository.fetchResult(
                     new StringBuilder(config.getBoundaryHost()
                             + config.getBoundarySearchEndpoint()
                             + "?limit=10"
@@ -377,6 +382,48 @@ public class ServiceRequestValidator {
         } catch (Exception e) {
             throw new CustomException("BOUNDARY_SERVICE_SEARCH_ERROR", "Error while fetching boundaries from Boundary Service : " + e.getMessage());
         }
+    }
+
+    /**
+     * The DIGIT 3.0 form of the existence check: {@code GET /boundary/v3/boundaries?codes=<code>}
+     * with the tenant in X-Tenant-ID and no body.
+     *
+     * <p>The 2.x call was raw string concatenation carrying {@code limit}, {@code offset} and
+     * {@code tenantId} on the query, with a BARE RequestInfo (not a wrapper) as the body. None of
+     * those four survives: v3 answers 400 "Missing X-Tenant-Id header" without the header and
+     * accepts-and-ignores a stray {@code ?tenantId=}, and limit/offset are meaningless for a
+     * lookup of exactly one code.
+     *
+     * <p>The reply is {@code {"boundary":[{id,tenantId,code,geometry,additionalAttributes,
+     * auditDetails}]}}. The lowercase {@code boundary} binds to BoundaryResponse's
+     * {@code @JsonProperty("Boundary")} for free, because PGRApp configures the shared ObjectMapper
+     * with ACCEPT_CASE_INSENSITIVE_PROPERTIES - so unlike the relationship search, this direction
+     * needs no key handling. A miss is 200 with {@code "boundary":[]}, the same shape as a 2.x
+     * miss and a legitimate answer; validateBoundary turns it into INVALID_BOUNDARY_CODE itself
+     * and nothing here may fake it into a hit.
+     *
+     * <p>ONE code only. Probed live: v3 answers {@code []} for both {@code ?codes=A,B} and
+     * {@code ?codes=A&codes=B} - its implementation matches the raw string as a single code - so
+     * a future multi-code caller here would silently validate nothing. CCRS has only ever sent
+     * one.
+     */
+    private Object searchBoundaryV3(ServiceRequest request, String localityCode) {
+        String tenantId = V3Headers.boundaryTenant(request.getRequestInfo(), request.getService().getTenantId());
+        String uri = UriComponentsBuilder
+                .fromHttpUrl(joinUrl(config.getBoundaryV3Host(), config.getBoundaryV3SearchEndpoint()))
+                .queryParam("codes", localityCode)
+                .encode()
+                .toUriString();
+        return serviceRequestRepository.exchange(HttpMethod.GET, uri, null,
+                V3Headers.forTenant(tenantId).build(), Map.class);
+    }
+
+    private static String joinUrl(String host, String endpoint) {
+        if (host.endsWith("/") && endpoint.startsWith("/"))
+            return host + endpoint.substring(1);
+        if (!host.endsWith("/") && !endpoint.startsWith("/"))
+            return host + "/" + endpoint;
+        return host + endpoint;
     }
 
 }

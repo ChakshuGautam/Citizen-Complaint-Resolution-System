@@ -1,28 +1,39 @@
 package org.egov.pgr.validator;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.MapperFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.egov.pgr.config.PGRConfiguration;
 import org.egov.pgr.repository.PGRRepository;
 import org.egov.pgr.repository.ServiceRequestRepository;
 import org.egov.pgr.util.HRMSUtil;
 import org.egov.pgr.util.MDMSUtils;
+import org.egov.pgr.util.V3Headers;
 import org.egov.pgr.web.models.*;
 import org.egov.pgr.web.models.boundary.BoundaryResponse;
 import org.egov.tracer.model.CustomException;
+import org.egov.tracer.model.ServiceCallException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
+import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.springframework.http.HttpMethod;
 
 import java.util.*;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyMap;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -33,7 +44,19 @@ public class ServiceRequestValidatorTest {
     @Mock private PGRRepository repository;
     @Mock private HRMSUtil hrmsUtil;
     @Mock private ServiceRequestRepository serviceRequestRepository;
-    @Mock private ObjectMapper objectMapper;
+    /**
+     * A REAL mapper, configured exactly as PGRApp configures the production one.
+     *
+     * <p>It used to be a @Mock, with every boundary test stubbing
+     * {@code convertValue(any(), eq(BoundaryResponse.class))} to hand back a ready-made
+     * BoundaryResponse. That made these tests structurally incapable of seeing a response-KEY
+     * change: they would have stayed green against a v3 reply CCRS could not read, which is
+     * precisely the failure mode this migration exists to catch. They now stub the raw envelope
+     * the transport actually returns and let the real mapper bind it.
+     */
+    @Spy private ObjectMapper objectMapper = new ObjectMapper()
+            .configure(MapperFeature.ACCEPT_CASE_INSENSITIVE_PROPERTIES, true)
+            .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
     @Mock private MDMSUtils mdmsUtils;
 
     @InjectMocks
@@ -84,10 +107,98 @@ public class ServiceRequestValidatorTest {
 
     @Test
     void create_emptyBoundaryList_throwsInvalidBoundaryCode() {
-        BoundaryResponse response = BoundaryResponse.builder().boundary(Collections.emptyList()).build();
-        when(serviceRequestRepository.fetchResult(any(), any())).thenReturn(response);
-        when(objectMapper.convertValue(any(), eq(BoundaryResponse.class))).thenReturn(response);
+        when(serviceRequestRepository.fetchResult(any(), any())).thenReturn(twoXEnvelope());
         assertCode("INVALID_BOUNDARY_CODE", () -> validator.validateCreate(request, mdmsData));
+    }
+
+    @Test
+    void create_twoXStillPostsTheLegacyUrlWithTheTenantOnTheQueryString() {
+        // Nothing asserted the produced 2.x request before this commit. It does now, so the
+        // rollback path cannot rot unnoticed while the v3 path is the one being exercised.
+        when(config.getBoundaryHost()).thenReturn("http://localhost:8081");
+        when(config.getBoundarySearchEndpoint()).thenReturn("/boundary-service/boundary/_search");
+        stubBoundaryResponse("LOC001");
+
+        assertDoesNotThrow(() -> validator.validateCreate(request, mdmsData));
+
+        ArgumentCaptor<StringBuilder> uri = ArgumentCaptor.forClass(StringBuilder.class);
+        ArgumentCaptor<Object> body = ArgumentCaptor.forClass(Object.class);
+        verify(serviceRequestRepository).fetchResult(uri.capture(), body.capture());
+        assertEquals("http://localhost:8081/boundary-service/boundary/_search"
+                + "?limit=10&offset=0&tenantId=pg.citya&codes=LOC001", uri.getValue().toString());
+        // 2.x posts a BARE RequestInfo, not a {"RequestInfo":{...}} wrapper.
+        assertSame(request.getRequestInfo(), body.getValue());
+        verify(serviceRequestRepository, never()).exchange(any(), anyString(), any(), anyMap(), any());
+    }
+
+    // ── validateBoundary on v3 ────────────────────────────────────────────────
+
+    @Test
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    void create_v3IsAGetOnCodesWithNoBodyAndTheTenantInAHeader() {
+        stubV3BoundaryResponse(v3Envelope("LOC001"));
+
+        assertDoesNotThrow(() -> validator.validateCreate(request, mdmsData));
+
+        ArgumentCaptor<HttpMethod> method = ArgumentCaptor.forClass(HttpMethod.class);
+        ArgumentCaptor<String> uri = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<Object> body = ArgumentCaptor.forClass(Object.class);
+        ArgumentCaptor<Map> headers = ArgumentCaptor.forClass(Map.class);
+        verify(serviceRequestRepository).exchange(method.capture(), uri.capture(), body.capture(),
+                headers.capture(), eq(Map.class));
+
+        assertEquals(HttpMethod.GET, method.getValue());
+        assertEquals("http://localhost:8081/boundary/v3/boundaries?codes=LOC001", uri.getValue());
+        assertNull(body.getValue(), "a v3 read carries no RequestInfo; a body makes it malformed");
+        assertEquals("pg.citya", headers.getValue().get(V3Headers.TENANT_ID));
+        verify(serviceRequestRepository, never()).fetchResult(any(), any());
+    }
+
+    @Test
+    void create_v3LowercaseEnvelopeKeyBindsAndThePresentCodePasses() {
+        // The lowercase "boundary" key binds to @JsonProperty("Boundary") for free, because
+        // PGRApp turns on ACCEPT_CASE_INSENSITIVE_PROPERTIES. This test exists to pin that: it is
+        // the reason this direction needs no key handling while the relationship search does.
+        stubV3BoundaryResponse(v3Envelope("LOC001"));
+        assertDoesNotThrow(() -> validator.validateCreate(request, mdmsData));
+    }
+
+    @Test
+    void create_v3CodeNotReturned_throwsInvalidBoundaryCode() {
+        stubV3BoundaryResponse(v3Envelope("DIFFERENT_CODE"));
+        assertCode("INVALID_BOUNDARY_CODE", () -> validator.validateCreate(request, mdmsData));
+    }
+
+    @Test
+    void create_v3EmptyBoundaryList_throwsInvalidBoundaryCode() {
+        // A miss on v3 is 200 with {"boundary":[]} - the same shape as a 2.x miss, and a
+        // legitimate answer. It must reach INVALID_BOUNDARY_CODE, never be faked into a hit.
+        stubV3BoundaryResponse(v3Envelope());
+        assertCode("INVALID_BOUNDARY_CODE", () -> validator.validateCreate(request, mdmsData));
+    }
+
+    @Test
+    void create_v3EnvelopeWithAnUnknownKeyIsRejectedRatherThanBindingToNulls() {
+        // THE test the inventory says was missing. FAIL_ON_UNKNOWN_PROPERTIES is off and binding
+        // is case-insensitive, so a renamed envelope key produces a well-formed BoundaryResponse
+        // with a null list and throws nothing. The only acceptable outcome is a refusal: a
+        // boundary that cannot be confirmed must not be accepted.
+        Map<String, Object> renamed = new LinkedHashMap<>();
+        renamed.put("boundaries", v3Envelope("LOC001").get("boundary"));
+        stubV3BoundaryResponse(renamed);
+
+        assertCode("INVALID_BOUNDARY_CODE", () -> validator.validateCreate(request, mdmsData));
+    }
+
+    @Test
+    void create_v3TransportFailure_throwsBoundaryServiceError() {
+        when(config.isBoundaryV3()).thenReturn(true);
+        when(config.getBoundaryV3Host()).thenReturn("http://localhost:8081");
+        when(config.getBoundaryV3SearchEndpoint()).thenReturn("/boundary/v3/boundaries");
+        when(serviceRequestRepository.exchange(any(HttpMethod.class), anyString(), any(), anyMap(), eq(Map.class)))
+                .thenThrow(new ServiceCallException("GET .../boundary/v3/boundaries -> 400 BAD_REQUEST"));
+
+        assertCode("BOUNDARY_SERVICE_SEARCH_ERROR", () -> validator.validateCreate(request, mdmsData));
     }
 
     @Test
@@ -119,14 +230,52 @@ public class ServiceRequestValidatorTest {
 
     // ── helpers ───────────────────────────────────────────────────────────────
 
+    /** The RAW 2.x envelope - capital "Boundary", as boundary-service really answers it. */
     private void stubBoundaryResponse(String code) {
-        org.egov.pgr.web.models.boundary.Boundary b =
-                org.egov.pgr.web.models.boundary.Boundary.builder().code(code).build();
-        BoundaryResponse response = BoundaryResponse.builder()
-                .boundary(Collections.singletonList(b))
-                .build();
-        when(serviceRequestRepository.fetchResult(any(), any())).thenReturn(response);
-        when(objectMapper.convertValue(any(), eq(BoundaryResponse.class))).thenReturn(response);
+        when(serviceRequestRepository.fetchResult(any(), any())).thenReturn(twoXEnvelope(code));
+    }
+
+    private Map<String, Object> twoXEnvelope(String... codes) {
+        List<Map<String, Object>> boundaries = new ArrayList<>();
+        for (String code : codes)
+            boundaries.add(new LinkedHashMap<>(Map.of("id", "b-" + code, "tenantId", "pg.citya", "code", code)));
+        Map<String, Object> envelope = new LinkedHashMap<>();
+        envelope.put("ResponseInfo", new LinkedHashMap<String, Object>());
+        envelope.put("Boundary", boundaries);
+        return envelope;
+    }
+
+    /**
+     * The RAW v3 envelope, as probed live: lowercase "boundary", "additionalAttributes" rather
+     * than "additionalDetails", and auditDetails spelled modifiedBy/modifiedTime.
+     */
+    private Map<String, Object> v3Envelope(String... codes) {
+        List<Map<String, Object>> boundaries = new ArrayList<>();
+        for (String code : codes) {
+            Map<String, Object> audit = new LinkedHashMap<>();
+            audit.put("createdBy", "sys");
+            audit.put("modifiedBy", "sys");
+            audit.put("createdTime", 1695000000000L);
+            audit.put("modifiedTime", 1695000000000L);
+            Map<String, Object> boundary = new LinkedHashMap<>();
+            boundary.put("id", "b-" + code);
+            boundary.put("tenantId", "pg.citya");
+            boundary.put("code", code);
+            boundary.put("additionalAttributes", new LinkedHashMap<String, Object>());
+            boundary.put("auditDetails", audit);
+            boundaries.add(boundary);
+        }
+        Map<String, Object> envelope = new LinkedHashMap<>();
+        envelope.put("boundary", boundaries);
+        return envelope;
+    }
+
+    private void stubV3BoundaryResponse(Map<String, Object> envelope) {
+        when(config.isBoundaryV3()).thenReturn(true);
+        when(config.getBoundaryV3Host()).thenReturn("http://localhost:8081");
+        when(config.getBoundaryV3SearchEndpoint()).thenReturn("/boundary/v3/boundaries");
+        when(serviceRequestRepository.exchange(any(HttpMethod.class), anyString(), any(), anyMap(), eq(Map.class)))
+                .thenReturn(envelope);
     }
 
     private static void assertCode(String expectedCode, org.junit.jupiter.api.function.Executable block) {
