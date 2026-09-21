@@ -1,6 +1,7 @@
 package org.egov.pgr.contract;
 
 import org.egov.pgr.service.WorkflowService;
+import org.egov.pgr.web.models.workflow.BusinessService;
 import org.egov.pgr.web.models.Service;
 import org.egov.pgr.web.models.ServiceRequest;
 import org.egov.pgr.web.models.ServiceWrapper;
@@ -14,6 +15,8 @@ import org.springframework.http.MediaType;
 import java.util.Collections;
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.hamcrest.Matchers.allOf;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
@@ -61,7 +64,6 @@ class V3WorkflowContractTest extends V3ContractTestSupport {
     }
 
     @Test
-    @Disabled("Enabled by C10 — feat(workflow): move the two read paths to v3")
     void businessServiceSearchIsAGetOnProcessCode() {
         server.expect(requestTo(allOf(
                         startsWith("http://localhost:8084/workflow/v3/process/definition?"),
@@ -76,11 +78,28 @@ class V3WorkflowContractTest extends V3ContractTestSupport {
                 .andExpect(content().bytes(new byte[0]))
                 .andRespond(withSuccess(V3_DEFINITION_RESPONSE, MediaType.APPLICATION_JSON));
 
-        assertingOnlyTheRequest(() -> workflowService.getBusinessService(transitionRequest()));
+        // Also assert the PARSED result, not only the request. C3 wrote this test to pin the
+        // request alone, because the response half belonged to the commit that migrated the
+        // dependency - this is that commit. A request-only assertion would pass against a mapping
+        // that read "definitions" as nothing: the envelope key, "id" -> "uuid", "code" ->
+        // "businessService" and "sla" -> "businessServiceSla" are all renames CCRS's
+        // case-insensitive ObjectMapper cannot absorb, and getting any of them wrong produces a
+        // BusinessService full of nulls, not an error.
+        BusinessService businessService = workflowService.getBusinessService(transitionRequest());
+        server.verify();
+
+        assertEquals("PGR", businessService.getBusinessService());
+        assertEquals("d1", businessService.getUuid());
+        assertEquals(432000000L, businessService.getBusinessServiceSla());
+        assertEquals(2, businessService.getStates().size());
+        // v3 forbids an empty state code and calls the 2.x nameless start state START; reading it
+        // back has to undo that, because MigrationUtils keys a map on the 2.x spelling.
+        assertNull(businessService.getStates().get(0).getState());
+        assertEquals(Boolean.TRUE, businessService.getStates().get(0).getIsStartState());
+        assertEquals("PENDINGFORASSIGNMENT", businessService.getStates().get(1).getState());
     }
 
     @Test
-    @Disabled("Enabled by C10 — feat(workflow): move the two read paths to v3")
     void processInstanceSearchIsAGetCarryingTheMandatoryProcessCode() {
         server.expect(requestTo(allOf(
                         startsWith("http://localhost:8084/workflow/v3/transition?"),
@@ -95,6 +114,10 @@ class V3WorkflowContractTest extends V3ContractTestSupport {
                         not(containsString("tenantId=")))))
                 .andExpect(method(HttpMethod.GET))
                 .andExpect(header("X-Tenant-ID", TENANT))
+                // Not in the C3 sketch, and mandatory: probed live 2026-09-21, this endpoint
+                // answers 400 "X-User-Id header is required" without it, although the process
+                // definition search next door does not need it.
+                .andExpect(header("X-User-ID", ACTOR_UUID))
                 .andExpect(content().bytes(new byte[0]))
                 .andRespond(withSuccess("{\"totalCount\":1,\"processInstances\":[{\"id\":\"t1\",\"processCode\":\"PGR\",\"entityId\":\""
                                 + SERVICE_REQUEST_ID + "\",\"action\":\"APPLY\",\"currentState\":\"PENDINGFORASSIGNMENT\",\"assignees\":[],"
@@ -106,7 +129,13 @@ class V3WorkflowContractTest extends V3ContractTestSupport {
                 .service(Service.builder().tenantId(TENANT).serviceRequestId(SERVICE_REQUEST_ID).build())
                 .build();
 
-        assertingOnlyTheRequest(() -> workflowService.enrichWorkflow(requestInfo(), List.of(wrapper)));
+        List<ServiceWrapper> enriched = workflowService.enrichWorkflow(requestInfo(), List.of(wrapper));
+        server.verify();
+
+        // And the parsed outcome. enrichWorkflow reads entityId -> businessId to key the join and
+        // would otherwise hand every complaint a null workflow at HTTP 200.
+        assertEquals(1, enriched.size());
+        assertEquals("APPLY", enriched.get(0).getWorkflow().getAction());
     }
 
     @Test

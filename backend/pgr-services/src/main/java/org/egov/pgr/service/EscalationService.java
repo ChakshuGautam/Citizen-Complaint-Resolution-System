@@ -13,6 +13,7 @@ import org.egov.pgr.web.models.Workflow;
 import org.egov.pgr.web.models.workflow.ProcessInstance;
 import org.egov.pgr.web.models.workflow.ProcessInstanceResponse;
 import org.egov.tracer.model.CustomException;
+import org.egov.tracer.model.ServiceCallException;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
@@ -240,16 +241,13 @@ public class EscalationService {
     /** Gets current assignees from the workflow process-instance source of truth. */
     public List<String> getCurrentAssignees(String serviceRequestId, String tenantId,
                                             RequestInfo requestInfo) {
-        StringBuilder url = workflowService.getprocessInstanceSearchURL(tenantId, serviceRequestId);
-        RequestInfoWrapper wrapper = RequestInfoWrapper.builder().requestInfo(requestInfo).build();
-        Object result = serviceRequestRepository.fetchResult(url, wrapper);
-
         try {
-            ProcessInstanceResponse response = mapper.convertValue(result, ProcessInstanceResponse.class);
-            if (response == null || CollectionUtils.isEmpty(response.getProcessInstances())) {
+            List<ProcessInstance> processInstances = workflowService.searchProcessInstances(
+                    requestInfo, tenantId, Collections.singletonList(serviceRequestId));
+            if (CollectionUtils.isEmpty(processInstances)) {
                 return Collections.emptyList();
             }
-            ProcessInstance instance = response.getProcessInstances().get(0);
+            ProcessInstance instance = processInstances.get(0);
             if (CollectionUtils.isEmpty(instance.getAssignes())) {
                 return Collections.emptyList();
             }
@@ -257,6 +255,14 @@ public class EscalationService {
                     .map(User::getUuid)
                     .filter(uuid -> uuid != null && !uuid.isBlank())
                     .collect(Collectors.toList());
+        } catch (CustomException | ServiceCallException e) {
+            // Deliberately NOT swallowed any more. This catch used to be a bare `catch (Exception)`
+            // returning an empty list, which reads as "this complaint has no assignees" - and under
+            // DIGIT 3.0 an unreadable envelope, a truncated list or a transport failure all arrive
+            // as one of these two. Escalation would then quietly decide there was nobody to
+            // escalate from. A genuinely empty workflow still returns an empty list above.
+            log.error("Workflow assignee lookup failed for complaint {}", serviceRequestId, e);
+            throw e;
         } catch (Exception e) {
             log.error("Failed to read workflow assignees for complaint {}", serviceRequestId, e);
             return Collections.emptyList();
@@ -274,21 +280,23 @@ public class EscalationService {
 
     private int workflowEscalationCount(String serviceRequestId, String tenantId,
                                         RequestInfo requestInfo, long windowStartedAt) {
-        StringBuilder url = workflowService.getProcessInstanceHistorySearchURL(tenantId, serviceRequestId);
-        RequestInfoWrapper wrapper = RequestInfoWrapper.builder().requestInfo(requestInfo).build();
-        Object result = serviceRequestRepository.fetchResult(url, wrapper);
         try {
-            ProcessInstanceResponse response = mapper.convertValue(result, ProcessInstanceResponse.class);
-            if (response == null || CollectionUtils.isEmpty(response.getProcessInstances())) {
+            List<ProcessInstance> processInstances =
+                    workflowService.searchProcessInstanceHistory(requestInfo, tenantId, serviceRequestId);
+            if (CollectionUtils.isEmpty(processInstances)) {
                 return 0;
             }
-            return (int) response.getProcessInstances().stream()
+            return (int) processInstances.stream()
                     .filter(instance -> ESCALATE.equalsIgnoreCase(instance.getAction()))
                     .filter(instance -> windowStartedAt <= 0
                             || (instance.getAuditDetails() != null
                             && instance.getAuditDetails().getCreatedTime() != null
                             && instance.getAuditDetails().getCreatedTime() >= windowStartedAt))
                     .count();
+        } catch (CustomException | ServiceCallException e) {
+            // Rethrown as-is: re-wrapping loses the only diagnosis there is. ServiceCallException in
+            // particular carries its text in getError(), and its getMessage() is always null.
+            throw e;
         } catch (Exception e) {
             throw new CustomException("ESCALATION_HISTORY_ERROR",
                     "Failed to reconcile escalation history for complaint " + serviceRequestId);

@@ -6,11 +6,15 @@ import org.egov.common.contract.request.RequestInfo;
 import org.egov.common.contract.request.User;
 import org.egov.pgr.config.PGRConfiguration;
 import org.egov.pgr.repository.ServiceRequestRepository;
+import org.egov.pgr.util.V3Headers;
 import org.egov.pgr.web.models.*;
 import org.egov.pgr.web.models.workflow.*;
+import org.egov.pgr.workflow.WorkflowV3Mapper;
 import org.egov.tracer.model.CustomException;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpMethod;
 import org.springframework.util.CollectionUtils;
+import org.springframework.web.util.UriComponentsBuilder;
 
 import java.util.*;
 import java.util.stream.Collectors;
@@ -46,11 +50,19 @@ public class WorkflowService {
 
     private ObjectMapper mapper;
 
+    /**
+     * Not a constructor argument: a fourth one would be a compile break for every test that builds
+     * this class by hand, for no gain. The mapper is a pure function of the ObjectMapper already
+     * being injected.
+     */
+    private final WorkflowV3Mapper v3Mapper;
+
     @Autowired
     public WorkflowService(PGRConfiguration pgrConfiguration, ServiceRequestRepository repository, ObjectMapper mapper) {
         this.pgrConfiguration = pgrConfiguration;
         this.repository = repository;
         this.mapper = mapper;
+        this.v3Mapper = new WorkflowV3Mapper(mapper);
     }
 
     /*
@@ -59,16 +71,73 @@ public class WorkflowService {
      *
      * */
     public BusinessService getBusinessService(ServiceRequest serviceRequest) {
-        String tenantId = serviceRequest.getService().getTenantId();
-        StringBuilder url = getBusinessServiceSearchURL(tenantId);
-        RequestInfoWrapper requestInfoWrapper = RequestInfoWrapper.builder().requestInfo(serviceRequest.getRequestInfo()).build();
-        Object result = repository.fetchResult(url, requestInfoWrapper);
-        BusinessServiceResponse response = parseBusinessServices(result);
+        return getBusinessService(serviceRequest.getRequestInfo(), serviceRequest.getService().getTenantId());
+    }
 
-        if (CollectionUtils.isEmpty(response.getBusinessServices()))
+    /**
+     * The PGR process definition for a tenant, on whichever stack the workflow flag selects.
+     *
+     * <p>Shared with {@code MigrationUtils}, which had its own copy of the URL builder and its own
+     * copy of the parse. One definition search, one place.
+     */
+    public BusinessService getBusinessService(RequestInfo requestInfo, String tenantId) {
+        List<BusinessService> businessServices = pgrConfiguration.isWorkflowV3()
+                ? searchBusinessServicesV3(requestInfo, tenantId)
+                : searchBusinessServices2x(requestInfo, tenantId);
+
+        if (CollectionUtils.isEmpty(businessServices))
             throw new CustomException("BUSINESSSERVICE_NOT_FOUND", "The businessService " + PGR_BUSINESSSERVICE + " is not found");
 
-        return response.getBusinessServices().get(0);
+        return businessServices.get(0);
+    }
+
+    private List<BusinessService> searchBusinessServices2x(RequestInfo requestInfo, String tenantId) {
+        StringBuilder url = getBusinessServiceSearchURL(tenantId);
+        RequestInfoWrapper requestInfoWrapper = RequestInfoWrapper.builder().requestInfo(requestInfo).build();
+        Object result = repository.fetchResult(url, requestInfoWrapper);
+        return parseBusinessServices(result).getBusinessServices();
+    }
+
+    /**
+     * {@code GET /workflow/v3/process/definition?processCode=PGR}, tenant in {@code X-Tenant-ID}.
+     *
+     * <p>2.x spelled the filter {@code businessServices}, put the tenant on the query string and
+     * sent a RequestInfo body. v3 does none of the three, and the envelope key is
+     * {@code definitions}, not {@code BusinessServices} - a rename CCRS's case-insensitive
+     * ObjectMapper cannot absorb, which is why this goes through {@link WorkflowV3Mapper} rather
+     * than {@code convertValue}.
+     *
+     * <p>No {@code size} is sent: probed live on 2026-09-21, this endpoint IGNORES it ({@code
+     * size=1} returned all three registered definitions and echoed {@code "size":3}), so asking
+     * would be theatre. The truncation assertion below is kept anyway, against the day it starts
+     * paging - v3 truncates with no error and the 2.x envelope has no field to carry "there was
+     * more".
+     *
+     * <p>X-User-ID is sent when the caller has one but is not required here; the definition search
+     * answers 200 without it, unlike the transition search.
+     */
+    private List<BusinessService> searchBusinessServicesV3(RequestInfo requestInfo, String tenantId) {
+        String which = "GET " + pgrConfiguration.getWorkflowV3ProcessDefinitionSearchPath();
+        String uri = UriComponentsBuilder
+                .fromHttpUrl(joinUrl(pgrConfiguration.getWorkflowV3Host(),
+                        pgrConfiguration.getWorkflowV3ProcessDefinitionSearchPath()))
+                .queryParam("processCode", PGR_BUSINESSSERVICE)
+                .encode()
+                .toUriString();
+
+        Map<?, ?> body = repository.exchange(HttpMethod.GET, uri, null,
+                V3Headers.forTenant(workflowTenant(requestInfo, tenantId))
+                        .withUserFrom(requestInfo)
+                        .build(),
+                Map.class);
+
+        List<Map<String, Object>> rows = v3Mapper.rowsOf(body, WorkflowV3Mapper.DEFINITIONS_KEY, which);
+        v3Mapper.assertNotTruncated(v3Mapper.totalCountOf(body), rows.size(), which);
+
+        List<BusinessService> businessServices = new ArrayList<>();
+        for (Map<String, Object> row : rows)
+            businessServices.add(v3Mapper.businessService(row, tenantId));
+        return businessServices;
     }
 
 
@@ -227,16 +296,127 @@ public class WorkflowService {
     /**
      * The latest transition for each of the given complaints.
      *
-     * <p>Pulled out of {@link #enrichWorkflow} so that the inbox join has one seam: 2.x serves
-     * every id in a single call with a comma-separated {@code businessIds}, and DIGIT 3.0 serves
-     * exactly one {@code entityId} per call.
+     * <p>This is the inbox join, and it is the one call shape v3 genuinely cannot serve. 2.x
+     * answers every id in one request with a comma-separated {@code businessIds}. v3's
+     * {@code GET /workflow/v3/transition} serves exactly ONE {@code entityId}: measured live on
+     * 2026-09-21, the comma form answers {@code totalCount 0} and the repeated form
+     * {@code ?entityId=a&entityId=b} honours only the FIRST value - both with HTTP 200. A
+     * two-complaint employee inbox therefore comes back with one row, or none, and looks like a
+     * successful search.
+     *
+     * <p>Until the fan-out lands, more than one id on v3 is refused outright rather than asked for
+     * and half-answered.
      */
-    private List<ProcessInstance> searchProcessInstances(RequestInfo requestInfo, String tenantId,
-                                                         List<String> serviceRequestIds) {
-        RequestInfoWrapper requestInfoWrapper = RequestInfoWrapper.builder().requestInfo(requestInfo).build();
-        StringBuilder searchUrl = getprocessInstanceSearchURL(tenantId, StringUtils.join(serviceRequestIds, ','));
-        Object result = repository.fetchResult(searchUrl, requestInfoWrapper);
-        return parseProcessInstances(result).getProcessInstances();
+    public List<ProcessInstance> searchProcessInstances(RequestInfo requestInfo, String tenantId,
+                                                        List<String> serviceRequestIds) {
+        if (CollectionUtils.isEmpty(serviceRequestIds))
+            return Collections.emptyList();
+
+        if (!pgrConfiguration.isWorkflowV3()) {
+            RequestInfoWrapper requestInfoWrapper = RequestInfoWrapper.builder().requestInfo(requestInfo).build();
+            StringBuilder searchUrl = getprocessInstanceSearchURL(tenantId, StringUtils.join(serviceRequestIds, ','));
+            Object result = repository.fetchResult(searchUrl, requestInfoWrapper);
+            return parseProcessInstances(result).getProcessInstances();
+        }
+
+        if (serviceRequestIds.size() > 1)
+            throw new CustomException("WORKFLOW_MULTI_ENTITY_UNSUPPORTED",
+                    "Asked the workflow service for " + serviceRequestIds.size() + " complaints in one search. "
+                            + "DIGIT 3.0 GET /workflow/v3/transition serves exactly one entityId - the comma form "
+                            + "answers totalCount 0 and the repeated form honours only the first value, both with "
+                            + "HTTP 200. Refusing to send it: a short list here is an employee inbox missing "
+                            + "complaints with no error anywhere.");
+
+        return searchProcessInstancesV3(requestInfo, tenantId, serviceRequestIds.get(0), null, false);
+    }
+
+    /**
+     * The full ordered transition history of one complaint, oldest first.
+     *
+     * <p>{@code NotificationService.getEmployeeName} scans it for the last matching action and
+     * {@code EscalationService} counts ESCALATEs in it, so an incomplete history resolves the wrong
+     * assignee or the wrong escalation level rather than failing.
+     */
+    public List<ProcessInstance> searchProcessInstanceHistory(RequestInfo requestInfo, String tenantId,
+                                                              String serviceRequestId) {
+        if (!pgrConfiguration.isWorkflowV3()) {
+            RequestInfoWrapper requestInfoWrapper = RequestInfoWrapper.builder().requestInfo(requestInfo).build();
+            StringBuilder url = getProcessInstanceHistorySearchURL(tenantId, serviceRequestId);
+            Object result = repository.fetchResult(url, requestInfoWrapper);
+            return parseProcessInstances(result).getProcessInstances();
+        }
+        return searchProcessInstancesV3(requestInfo, tenantId, serviceRequestId, null, true);
+    }
+
+    /**
+     * {@code GET /workflow/v3/transition}, the one v3 endpoint behind all three 2.x process-search
+     * shapes.
+     *
+     * <pre>
+     *   ?processCode=PGR&entityId=&lt;one&gt;[&amp;assignee=][&amp;history=true]&amp;size=100
+     *   X-Tenant-ID: &lt;tenant&gt;      X-User-ID: &lt;acting uuid&gt;
+     * </pre>
+     *
+     * <p>Three things here are not in the 2.x call and each was verified live:
+     * <ul>
+     *   <li><b>{@code processCode} is mandatory</b> - 400 "processCode query parameter is required
+     *       when filtering by entityId". 2.x sends none, because business ids are globally unique
+     *       there. It is supplied explicitly from PGR_BUSINESSSERVICE rather than defaulted from
+     *       config, so a second module behind this call cannot be searched under the wrong process
+     *       and answered empty with HTTP 200.</li>
+     *   <li><b>{@code X-User-Id} is mandatory</b> on this endpoint - 400 "X-User-Id header is
+     *       required" - although the definition search does not need it. It is checked here rather
+     *       than left to produce a 400 three frames away.</li>
+     *   <li><b>The tenant is a header, not a query parameter.</b></li>
+     * </ul>
+     */
+    private List<ProcessInstance> searchProcessInstancesV3(RequestInfo requestInfo, String tenantId,
+                                                           String entityId, String assigneeUuid, boolean history) {
+        String which = "GET " + pgrConfiguration.getWorkflowV3TransitionPath();
+        String userId = V3Headers.userIdOf(requestInfo);
+        if (userId == null)
+            throw new CustomException("WORKFLOW_ACTOR_MISSING",
+                    "No acting user uuid to put in X-User-ID. DIGIT 3.0 " + which + " answers 400 "
+                            + "\"X-User-Id header is required\" without it, so the call cannot be made.");
+
+        UriComponentsBuilder uri = UriComponentsBuilder
+                .fromHttpUrl(joinUrl(pgrConfiguration.getWorkflowV3Host(), pgrConfiguration.getWorkflowV3TransitionPath()))
+                .queryParam("processCode", PGR_BUSINESSSERVICE);
+        if (!StringUtils.isEmpty(entityId))
+            uri.queryParam("entityId", entityId);
+        if (!StringUtils.isEmpty(assigneeUuid))
+            uri.queryParam("assignee", assigneeUuid);
+        if (history)
+            uri.queryParam("history", "true");
+        uri.queryParam("size", pgrConfiguration.getV3PageMaxSize());
+
+        Map<String, String> headers = V3Headers.forTenant(workflowTenant(requestInfo, tenantId))
+                .withUserFrom(requestInfo)
+                .build();
+
+        Map<?, ?> body = repository.exchange(HttpMethod.GET, uri.encode().toUriString(), null, headers, Map.class);
+
+        List<Map<String, Object>> rows = v3Mapper.rowsOf(body, WorkflowV3Mapper.PROCESS_INSTANCES_KEY, which);
+        v3Mapper.assertNotTruncated(v3Mapper.totalCountOf(body), rows.size(), which);
+
+        List<ProcessInstance> processInstances = new ArrayList<>();
+        for (Map<String, Object> row : rows)
+            processInstances.add(v3Mapper.processInstance(row, tenantId, PGR_BUSINESSSERVICE,
+                    PGR_MODULENAME, V3Headers.userIdOf(requestInfo), which));
+        return processInstances;
+    }
+
+    /** workflow tenancy: the tenant the caller named, then the acting user's. */
+    private static String workflowTenant(RequestInfo requestInfo, String tenantId) {
+        return V3Headers.workflowTenant(requestInfo, tenantId, null);
+    }
+
+    private static String joinUrl(String host, String endpoint) {
+        if (host.endsWith("/") && endpoint.startsWith("/"))
+            return host + endpoint.substring(1);
+        if (!host.endsWith("/") && !endpoint.startsWith("/"))
+            return host + "/" + endpoint;
+        return host + endpoint;
     }
 
     private Map<String, List<ServiceWrapper>> getTenantIdToServiceWrapperMap(List<ServiceWrapper> serviceWrappers) {
@@ -331,23 +511,28 @@ public class WorkflowService {
 
 
     public Set<String> getServiceRequestIdsByAssignee(RequestInfo requestInfo, String tenantId, String assigneeUuid) {
-        StringBuilder url = getProcessInstanceSearchURLByAssignee(tenantId, assigneeUuid);
+        List<ProcessInstance> processInstances;
 
-        RequestInfoWrapper requestInfoWrapper = RequestInfoWrapper.builder().requestInfo(requestInfo).build();
-        Object result = repository.fetchResult(url, requestInfoWrapper);
-
-        ProcessInstanceResponse response;
-        try {
-            response = mapper.convertValue(result, ProcessInstanceResponse.class);
-        } catch (IllegalArgumentException e) {
-            throw new CustomException("PARSING ERROR", "Failed to parse workflow response for assignee search");
+        if (pgrConfiguration.isWorkflowV3()) {
+            processInstances = searchProcessInstancesV3(requestInfo, tenantId, null, assigneeUuid, false);
+        } else {
+            StringBuilder url = getProcessInstanceSearchURLByAssignee(tenantId, assigneeUuid);
+            RequestInfoWrapper requestInfoWrapper = RequestInfoWrapper.builder().requestInfo(requestInfo).build();
+            Object result = repository.fetchResult(url, requestInfoWrapper);
+            ProcessInstanceResponse response;
+            try {
+                response = mapper.convertValue(result, ProcessInstanceResponse.class);
+            } catch (IllegalArgumentException e) {
+                throw new CustomException("PARSING ERROR", "Failed to parse workflow response for assignee search");
+            }
+            processInstances = response.getProcessInstances();
         }
 
-        if (CollectionUtils.isEmpty(response.getProcessInstances())) {
+        if (CollectionUtils.isEmpty(processInstances)) {
             return Collections.emptySet();
         }
 
-        return response.getProcessInstances().stream()
+        return processInstances.stream()
                 .map(ProcessInstance::getBusinessId)
                 .collect(Collectors.toSet());
     }

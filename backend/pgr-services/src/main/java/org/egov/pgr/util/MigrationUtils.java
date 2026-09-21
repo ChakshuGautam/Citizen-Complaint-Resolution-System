@@ -8,11 +8,12 @@ import org.egov.common.contract.request.RequestInfo;
 import org.egov.mdms.model.MdmsCriteriaReq;
 import org.egov.pgr.config.PGRConfiguration;
 import org.egov.pgr.repository.ServiceRequestRepository;
+import org.egov.pgr.service.WorkflowService;
 import org.egov.pgr.web.models.RequestInfoWrapper;
 import org.egov.pgr.web.models.User;
 import org.egov.pgr.web.models.user.UserDetailResponse;
 import org.egov.pgr.web.models.user.UserSearchRequest;
-import org.egov.pgr.web.models.workflow.BusinessServiceResponse;
+import org.egov.pgr.web.models.workflow.BusinessService;
 import org.egov.pgr.web.models.workflow.State;
 import org.egov.tracer.model.CustomException;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -41,13 +42,16 @@ public class MigrationUtils {
 
     private MDMSUtils mdmsUtils;
 
+    private WorkflowService workflowService;
+
     @Autowired
-    public MigrationUtils(UserUtils userUtils, PGRConfiguration config, ObjectMapper mapper, ServiceRequestRepository repository, MDMSUtils mdmsUtils) {
+    public MigrationUtils(UserUtils userUtils, PGRConfiguration config, ObjectMapper mapper, ServiceRequestRepository repository, MDMSUtils mdmsUtils, WorkflowService workflowService) {
         this.userUtils = userUtils;
         this.config = config;
         this.mapper = mapper;
         this.repository = repository;
         this.mdmsUtils = mdmsUtils;
+        this.workflowService = workflowService;
     }
 
 
@@ -88,22 +92,29 @@ public class MigrationUtils {
 
 
 
+    /**
+     * status code -> state uuid, for the 2.x migration.
+     *
+     * <p>The definition search itself now lives in {@link WorkflowService}, which owns both stacks;
+     * this class used to keep a second copy of the URL builder and a second copy of the parse, and
+     * two copies of a call that is about to change shape is one too many.
+     *
+     * <p>The null-key skip below is not cosmetic. The 2.x PGR start state is NAMELESS, so its
+     * {@code state} is null, and {@code Collectors.toMap} throws NullPointerException on a null
+     * key. Under DIGIT 3.0 that state is certain to appear: v3 forbids an empty state code, the
+     * registered definition calls it START, and the mapper turns START back into the 2.x null. The
+     * start state has no status to key, so it is skipped rather than allowed to NPE.
+     */
     public Map<String,String> getStatusToUUIDMap(String tenantId) {
-        StringBuilder url = getSearchURLWithParams(tenantId, PGR_BUSINESSSERVICE);
-        RequestInfoWrapper requestInfoWrapper = RequestInfoWrapper.builder().requestInfo(new RequestInfo()).build();
-        Object result = repository.fetchResult(url, requestInfoWrapper);
-        BusinessServiceResponse response = null;
-        try {
-            response = mapper.convertValue(result, BusinessServiceResponse.class);
-        } catch (IllegalArgumentException e) {
-            throw new CustomException("PARSING ERROR", "Failed to parse response of workflow business service search");
-        }
+        BusinessService businessService = workflowService.getBusinessService(new RequestInfo(), tenantId);
 
-        if (CollectionUtils.isEmpty(response.getBusinessServices()))
-            throw new CustomException("BUSINESSSERVICE_NOT_FOUND", "The businessService " + PGR_BUSINESSSERVICE + " is not found");
+        if (CollectionUtils.isEmpty(businessService.getStates()))
+            throw new CustomException("BUSINESSSERVICE_NOT_FOUND", "The businessService " + PGR_BUSINESSSERVICE + " has no states");
 
-        Map<String,String> statusToUUIDMap = response.getBusinessServices().get(0).getStates().stream()
-                .collect(Collectors.toMap(State::getState,State::getUuid));
+        Map<String,String> statusToUUIDMap = new HashMap<>();
+        for (State state : businessService.getStates())
+            if (state.getState() != null)
+                statusToUUIDMap.put(state.getState(), state.getUuid());
 
         return statusToUUIDMap;
     }
@@ -139,18 +150,6 @@ public class MigrationUtils {
         return serviceCodeToSLA;
     }
 
-
-
-    private StringBuilder getSearchURLWithParams(String tenantId, String businessService) {
-
-        StringBuilder url = new StringBuilder(config.getWfHost());
-        url.append(config.getWfBusinessServiceSearchPath());
-        url.append("?tenantId=");
-        url.append(tenantId);
-        url.append("&businessServices=");
-        url.append(businessService);
-        return url;
-    }
 
 
 }
