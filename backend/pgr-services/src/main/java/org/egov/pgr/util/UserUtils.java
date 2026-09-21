@@ -76,16 +76,41 @@ public class UserUtils {
         String format1 = "dd-MM-yyyy HH:mm:ss";
         if(users!=null){
             users.forEach( map -> {
-                        map.put("createdDate",dateTolong((String)map.get("createdDate"),format1));
-                        if((String)map.get("lastModifiedDate")!=null)
-                            map.put("lastModifiedDate",dateTolong((String)map.get("lastModifiedDate"),format1));
-                        if((String)map.get("dob")!=null)
-                            map.put("dob",dateTolong((String)map.get("dob"),dobFormat));
-                        if((String)map.get("pwdExpiryDate")!=null)
-                            map.put("pwdExpiryDate",dateTolong((String)map.get("pwdExpiryDate"),format1));
+                        putDateAsLong(map,"createdDate",format1);
+                        putDateAsLong(map,"lastModifiedDate",format1);
+                        putDateAsLong(map,"dob",dobFormat);
+                        putDateAsLong(map,"pwdExpiryDate",format1);
                     }
             );
         }
+    }
+
+    /**
+     * Converts one date field of a user map from its 2.x string form to epoch millis, in place.
+     *
+     * createdDate used to be converted unguarded, unlike the three fields beneath it, so a user
+     * object that carried no createdDate - or carried one that was not a String - failed inside
+     * pgr-services rather than at the boundary: a null went into SimpleDateFormat.parse and came
+     * back out as an NPE, and a numeric epoch blew up on the (String) cast before it ever reached
+     * the parser. Both are shapes a differently-shaped user response legitimately has (a v3
+     * individual reports auditDetail.createdTime as epoch millis, or not at all), so neither is a
+     * parse error. An absent, null, blank or already-numeric value is therefore left exactly as it
+     * is; only a non-blank String is parsed, and a String that will not parse still fails loudly
+     * with INVALID_DATE_FORMAT, which is the one case that really is bad input.
+     *
+     * @param map one user object from the user service response
+     * @param field the date field to convert
+     * @param format the expected date format, or null if the caller could not determine one
+     */
+    private void putDateAsLong(LinkedHashMap map, String field, String format){
+        Object value = map.get(field);
+        if(!(value instanceof String) || ((String)value).trim().isEmpty())
+            return;
+        if(format==null){
+            log.warn("No date format resolved for user field '{}'; leaving it unparsed", field);
+            return;
+        }
+        map.put(field,dateTolong((String)value,format));
     }
 
     /**
