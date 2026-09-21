@@ -4,7 +4,6 @@ import org.egov.common.utils.MultiStateInstanceUtil;
 import org.egov.pgr.producer.Producer;
 import org.egov.pgr.util.NotificationUtil;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
@@ -14,6 +13,7 @@ import static org.hamcrest.Matchers.allOf;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.startsWith;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.content;
@@ -43,7 +43,6 @@ class V3LocalizationContractTest extends V3ContractTestSupport {
     }
 
     @Test
-    @Disabled("Enabled by C4 — feat(localization): move to GET /localization/v3/messages")
     void localizationSearchIsAGetWithTheTenantInAHeader() {
         server.expect(requestTo(allOf(
                         startsWith("http://localhost:8087/localization/v3/messages?"),
@@ -60,6 +59,14 @@ class V3LocalizationContractTest extends V3ContractTestSupport {
                 .andRespond(withSuccess("{\"messages\":[{\"code\":\"pgr.complaint.created\",\"message\":\"Your complaint is registered\",\"module\":\"rainmaker-pgr\",\"locale\":\"en_IN\",\"uuid\":\"7b1b\"}]}",
                         MediaType.APPLICATION_JSON));
 
-        assertingOnlyTheRequest(() -> notificationUtil.getLocalizationMessages(TENANT, requestInfo(), "rainmaker-pgr"));
+        String localization = notificationUtil.getLocalizationMessages(TENANT, requestInfo(), "rainmaker-pgr");
+        server.verify();
+
+        // C4 made the response half real, so this no longer stops at the request. The string this
+        // method returns is read downstream by JsonPath alone, which answers "no match" and "the
+        // envelope was not what you think" identically - so asserting a resolved message is the
+        // only way this test can tell a working v3 read from one that quietly returns nothing.
+        assertEquals("Your complaint is registered", notificationUtil.getCustomizedMsgForPlaceholder(
+                localization, "pgr.complaint.created"));
     }
 }

@@ -13,9 +13,11 @@ import org.egov.pgr.web.models.Notification.SMSRequest;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpMethod;
 import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 import org.springframework.web.client.RestTemplate;
+import org.springframework.web.util.UriComponentsBuilder;
 
 import java.util.*;
 import static org.egov.pgr.util.PGRConstants.*;
@@ -48,10 +50,73 @@ public class NotificationUtil {
      * @return Return Localisation Message
      */
     public String getLocalizationMessages(String tenantId, RequestInfo requestInfo,String module) {
+        if (config.isLocalizationV3())
+            return getLocalizationMessagesV3(tenantId, requestInfo, module);
         @SuppressWarnings("rawtypes")
         LinkedHashMap responseMap = (LinkedHashMap) serviceRequestRepository.fetchResult(getUri(tenantId, requestInfo, module),
                 requestInfo);
         return new JSONObject(responseMap).toString();
+    }
+
+    /**
+     * The DIGIT 3.0 form of the same lookup.
+     *
+     * <p>Three differences from 2.x, and only three: the verb is GET, the tenant travels in
+     * X-Tenant-ID instead of {@code ?tenantId=}, and there is no RequestInfo body — v3 reads
+     * nothing from a body on a read and a body makes the request malformed. The response shape is
+     * unchanged ({@code {"messages":[{code,message,module,locale}]}}, plus an inert {@code uuid}
+     * that FAIL_ON_UNKNOWN_PROPERTIES=false ignores), so every caller of this method and the
+     * JsonPath in {@link #getCustomizedMsgForPlaceholder} are untouched. Probed live against
+     * d3-localization: a filtered search returns only the matching rows and an unknown locale or
+     * module correctly returns an empty list.
+     *
+     * <p>Resolved at the STATE-level tenant, exactly as 2.x resolves it.
+     */
+    private String getLocalizationMessagesV3(String tenantId, RequestInfo requestInfo, String module) {
+        String stateLevelTenant = centralInstanceUtil.getStateLevelTenant(tenantId);
+        log.info("tenantId after calling central instance method :" + stateLevelTenant);
+        @SuppressWarnings("rawtypes")
+        Map responseMap = serviceRequestRepository.exchange(HttpMethod.GET,
+                getV3Uri(stateLevelTenant, requestInfo, module), null,
+                V3Headers.forTenant(stateLevelTenant).build(), Map.class);
+        return new JSONObject(responseMap == null ? Collections.emptyMap() : responseMap).toString();
+    }
+
+    /**
+     * Builds the v3 localization URI. Already encoded when it leaves here, because
+     * {@code ServiceRequestRepository.exchange} passes it to {@code URI.create} with no template
+     * expansion.
+     *
+     * @param stateLevelTenantId the STATE-level tenant — carried only so that it is NOT put on the
+     *                           query string; it belongs in X-Tenant-ID
+     */
+    public String getV3Uri(String stateLevelTenantId, RequestInfo requestInfo, String module) {
+        return UriComponentsBuilder
+                .fromHttpUrl(joinUrl(config.getLocalizationV3Host(), config.getLocalizationV3SearchEndpoint()))
+                .queryParam("locale", localeOf(requestInfo))
+                .queryParam("module", module)
+                .encode()
+                .toUriString();
+    }
+
+    private static String joinUrl(String host, String endpoint) {
+        if (host.endsWith("/") && endpoint.startsWith("/"))
+            return host + endpoint.substring(1);
+        if (!host.endsWith("/") && !endpoint.startsWith("/"))
+            return host + "/" + endpoint;
+        return host + endpoint;
+    }
+
+    /**
+     * The locale the caller asked for, read off {@code RequestInfo.msgId} as {@code <id>|<locale>}.
+     * Lifted verbatim out of {@link #getUri} so that the 2.x and v3 URI builders cannot drift
+     * apart; the behaviour, quirks included, is unchanged.
+     */
+    private String localeOf(RequestInfo requestInfo) {
+        String locale = NOTIFICATION_LOCALE;
+        if (!StringUtils.isEmpty(requestInfo.getMsgId()) && requestInfo.getMsgId().split("|").length >= 2)
+            locale = requestInfo.getMsgId().split("\\|")[1];
+        return locale;
     }
 
     /**
@@ -67,9 +132,7 @@ public class NotificationUtil {
             tenantId= centralInstanceUtil.getStateLevelTenant(tenantId);*/
         tenantId= centralInstanceUtil.getStateLevelTenant(tenantId);
         log.info("tenantId after calling central instance method :"+ tenantId);
-        String locale = NOTIFICATION_LOCALE;
-        if (!StringUtils.isEmpty(requestInfo.getMsgId()) && requestInfo.getMsgId().split("|").length >= 2)
-            locale = requestInfo.getMsgId().split("\\|")[1];
+        String locale = localeOf(requestInfo);
         StringBuilder uri = new StringBuilder();
         uri.append(config.getLocalizationHost()).append(config.getLocalizationContextPath())
                 .append(config.getLocalizationSearchEndpoint()).append("?").append("locale=").append(locale)
