@@ -154,3 +154,7 @@ charts/*.tgz
 # ─── Operator Local Testing ──────────────────────────────────────────────────
 local-testing/
 .agent/
+
+# macOS AppleDouble metadata (never source)
+._*
+.DS_Store
