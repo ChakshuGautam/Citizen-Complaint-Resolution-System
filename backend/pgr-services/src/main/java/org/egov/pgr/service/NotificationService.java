@@ -75,6 +75,9 @@ public class NotificationService {
     @Autowired
     private Producer producer;
 
+    @Autowired
+    private org.egov.pgr.identity.IndividualV3Client individualV3Client;
+
     public void process(ServiceRequest request, String topic) {
         // Config-driven path (MDMS NotificationRouting + NotificationTemplate). When the flag is
         // off, fall through to the verbatim legacy behavior below.
@@ -588,6 +591,24 @@ public class NotificationService {
 
         requestInfo.setUserInfo(userInfo);
 
+        if (config.isUserV3()) {
+            // The 2.x call pins userType=EMPLOYEE, which v3 cannot express: the Individual schema
+            // has no user type, and an employment record lives in a different service entirely.
+            // Here the uuid is resolved through the identity map against the individual registry;
+            // an employee uuid is therefore a loud IDENTITY_MAP_MISS rather than the silent
+            // {"user":[]} the shim measured, which is what made every domain event say "NA".
+            try {
+                List<org.egov.pgr.web.models.User> found =
+                        individualV3Client.searchByLegacyUuids(Collections.singletonList(uuidstring), tenantId, requestInfo);
+                return found.isEmpty() ? null : found.get(0);
+            } catch (Exception e) {
+                log.error("Could not resolve user {} in the DIGIT 3.0 individual registry", uuidstring, e);
+                return null;
+            } finally {
+                requestInfo.setUserInfo(userInfoCopy);
+            }
+        }
+
         StringBuilder uri = new StringBuilder();
         uri.append(config.getUserHost()).append(config.getUserSearchEndpoint());
         Map<String, Object> userSearchRequest = new HashMap<>();
@@ -809,6 +830,25 @@ public class NotificationService {
      */
     public Map<String, String> fetchUserUUIDs(String mobileNumber, RequestInfo requestInfo, String tenantId) {
         Map<String, String> mapOfPhoneNoAndUUIDs = new HashMap<>();
+
+        if (config.isUserV3()) {
+            // 2.x searched by userName, which for every citizen it created IS the mobile number
+            // (UserUtils.addUserDefaultFields). v3 rejects userName as an unknown field, so the
+            // mobile number - one of the three filters the shipped build actually applies - is the
+            // only honest translation, and it is exactly the same question.
+            try {
+                List<org.egov.pgr.web.models.User> found =
+                        individualV3Client.searchByMobileNumber(mobileNumber, tenantId, requestInfo);
+                if (!found.isEmpty())
+                    mapOfPhoneNoAndUUIDs.put(mobileNumber, found.get(0).getUuid());
+                else
+                    log.error("No individual holds mobile number {} in tenant {}", mobileNumber, tenantId);
+            } catch (Exception e) {
+                log.error("Exception while resolving individual for mobile number {}", mobileNumber, e);
+            }
+            return mapOfPhoneNoAndUUIDs;
+        }
+
         StringBuilder uri = new StringBuilder();
         uri.append(config.getUserHost()).append(config.getUserSearchEndpoint());
         Map<String, Object> userSearchRequest = new HashMap<>();

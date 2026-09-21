@@ -33,7 +33,7 @@ class UserUtilsParseResponseTest {
 
     @BeforeEach
     void setup() {
-        userUtils = new UserUtils(new ObjectMapper(), null, null);
+        userUtils = new UserUtils(new ObjectMapper(), null, null, null);
     }
 
     private static LinkedHashMap<String, Object> responseWithOneUser(LinkedHashMap<String, Object> user) {

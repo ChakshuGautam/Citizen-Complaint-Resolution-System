@@ -2,15 +2,20 @@ package org.egov.pgr.util;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.egov.common.contract.request.RequestInfo;
 import org.egov.common.contract.request.Role;
 import org.egov.common.utils.MultiStateInstanceUtil;
 import org.egov.pgr.config.PGRConfiguration;
+import org.egov.pgr.identity.IndividualV3Client;
 import org.egov.pgr.repository.ServiceRequestRepository;
 import org.egov.pgr.web.models.User;
+import org.egov.pgr.web.models.user.CreateUserRequest;
 import org.egov.pgr.web.models.user.UserDetailResponse;
+import org.egov.pgr.web.models.user.UserSearchRequest;
 import org.egov.tracer.model.CustomException;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+import org.springframework.util.CollectionUtils;
 
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
@@ -18,6 +23,8 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
+
+import static org.egov.pgr.util.PGRConstants.USERTYPE_CITIZEN;
 
 @Component
 @Slf4j
@@ -30,14 +37,18 @@ public class UserUtils {
 
     private PGRConfiguration config;
 
+    private IndividualV3Client individualV3Client;
+
     @Autowired
     private MultiStateInstanceUtil centralInstanceUtil;
 
     @Autowired
-    public UserUtils(ObjectMapper mapper, ServiceRequestRepository serviceRequestRepository, PGRConfiguration config) {
+    public UserUtils(ObjectMapper mapper, ServiceRequestRepository serviceRequestRepository, PGRConfiguration config,
+                     IndividualV3Client individualV3Client) {
         this.mapper = mapper;
         this.serviceRequestRepository = serviceRequestRepository;
         this.config = config;
+        this.individualV3Client = individualV3Client;
     }
 
     /**
@@ -48,6 +59,9 @@ public class UserUtils {
      */
 
     public UserDetailResponse userCall(Object userRequest, StringBuilder uri) {
+        if (config != null && config.isUserV3())
+            return individualCall(userRequest, uri);
+
         String dobFormat = null;
         if(uri.toString().contains(config.getUserSearchEndpoint())  || uri.toString().contains(config.getUserUpdateEndpoint()))
             dobFormat="yyyy-MM-dd";
@@ -65,6 +79,78 @@ public class UserUtils {
         }
     }
 
+
+    /**
+     * The same funnel, answered by the DIGIT 3.0 individual registry.
+     *
+     * <p>Every 2.x user path in this service goes through {@link #userCall}, so the branch is here
+     * rather than at six call sites: each caller keeps its own shape and its own assertions, and
+     * the 2.x wire call above stays byte-identical so a deployment that flips and finds the new
+     * stack wrong gets yesterday's behaviour back by moving one property.
+     *
+     * <p>The translation is deliberately NARROW. 2.x sends filters on every search - userType,
+     * active, a page number, a role code - and v3 accepts all of them and applies none, answering
+     * 200 with the whole tenant. Sending a filter that does not filter is worse than sending none,
+     * so a search this method cannot serve with a filter it has watched work is refused by name
+     * rather than widened.
+     */
+    private UserDetailResponse individualCall(Object userRequest, StringBuilder uri) {
+        if (userRequest instanceof UserSearchRequest)
+            return individualSearch((UserSearchRequest) userRequest);
+
+        if (userRequest instanceof CreateUserRequest)
+            throw new CustomException("USER_WRITE_UNSUPPORTED_ON_V3",
+                    "Creating or updating a person in the DIGIT 3.0 individual registry is not wired yet. "
+                            + "It is not a re-point: create rejects userName, type and roles as unknown fields and "
+                            + "demands a gender CCRS's user model does not have, and update is optimistic-"
+                            + "concurrency - a PUT with no record version is 409 ROW_VERSION_MISMATCH, so it needs "
+                            + "a read first. Refusing rather than writing half a person.");
+
+        throw new CustomException("USER_REQUEST_UNSUPPORTED_ON_V3",
+                "Unrecognised user request of type " + userRequest.getClass().getName() + " for " + uri);
+    }
+
+    private UserDetailResponse individualSearch(UserSearchRequest request) {
+        String tenantId = request.getTenantId();
+        RequestInfo requestInfo = request.getRequestInfo();
+
+        if (!CollectionUtils.isEmpty(request.getRoleCodes()))
+            throw new CustomException("USER_FILTER_UNSUPPORTED_ON_V3",
+                    "A role-filtered user search has no DIGIT 3.0 expression: roles are Keycloak realm roles and "
+                            + "the individual registry has no roles field and no role filter.");
+
+        if (!CollectionUtils.isEmpty(request.getUuid()))
+            return new UserDetailResponse(null,
+                    individualV3Client.searchByLegacyUuids(request.getUuid(), tenantId, requestInfo));
+
+        String mobileNumber = request.getMobileNumber();
+        if (mobileNumber == null || mobileNumber.trim().isEmpty()) {
+            // 2.x sets userName = mobileNumber for every citizen it creates
+            // (addUserDefaultFields below), and v3 rejects userName outright as an unknown field.
+            // So a CITIZEN search by userName IS a search by mobile number, and that equivalence is
+            // the only reason this is a translation rather than a guess. It does not hold for an
+            // employee, whose userName is a staff code - hence the pin.
+            String userName = request.getUserName();
+            if (userName != null && !userName.trim().isEmpty()) {
+                if (!USERTYPE_CITIZEN.equalsIgnoreCase(request.getUserType()))
+                    throw new CustomException("USER_FILTER_UNSUPPORTED_ON_V3",
+                            "A search by userName is only translatable for a CITIZEN, where 2.x set userName to the "
+                                    + "mobile number. This search asks for userType=" + request.getUserType()
+                                    + ", whose userName is a staff code that the individual registry has never held.");
+                mobileNumber = userName;
+            }
+        }
+
+        if (mobileNumber != null && !mobileNumber.trim().isEmpty())
+            return new UserDetailResponse(null,
+                    individualV3Client.searchByMobileNumber(mobileNumber, tenantId, requestInfo));
+
+        throw new CustomException("USER_FILTER_UNSUPPORTED_ON_V3",
+                "A user search with no uuid, mobile number or userName cannot be served on DIGIT 3.0. Only id, "
+                        + "individualId and mobileNumber are filters the shipped build actually applies; userType, "
+                        + "active and userId are accepted and ignored, and an unfiltered search answers 200 with "
+                        + "every individual in the tenant.");
+    }
 
 /**
  * Parses date formats to long for all users in responseMap
