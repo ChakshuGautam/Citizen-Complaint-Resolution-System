@@ -16,6 +16,7 @@ import org.egov.pgr.web.models.ServiceRequest;
 import org.egov.pgr.web.models.User;
 import org.egov.pgr.web.models.Workflow;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
@@ -33,6 +34,8 @@ import java.util.List;
 import java.util.Map;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.Mockito.never;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.times;
@@ -40,9 +43,18 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Pins the role-pool resolver (B5): a role audience that spans more than one egov-user page must
- * be fully paginated (pageSize/pageNumber loop), and a uuid appearing on more than one page must be
- * notified exactly once. Without pagination a 100+ holder pool silently truncates to the first page.
+ * Pins the role-pool resolver (B5) on BOTH stacks.
+ *
+ * <p><b>On 2.x</b>, which is what every deployment still ships: a role audience spanning more than
+ * one egov-user page must be fully paginated (pageSize/pageNumber loop), and a uuid appearing on
+ * more than one page must be notified exactly once. Without pagination a 100+ holder pool silently
+ * truncates to the first page. Both of those methods are KEPT, unweakened and unrenamed in
+ * substance, because egov.user.api.version still defaults to 2.x and they cover code that runs.
+ *
+ * <p><b>On v3</b> the capability does not exist. The individual registry has no roles field, no
+ * role filter and no user type; roles are Keycloak realm roles. So the third method here pins the
+ * REFUSAL: nothing is searched, nobody in the pool is notified, and the failure is reported per
+ * audience rather than swallowed into an empty list that reads as "this role has no holders".
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -143,7 +155,9 @@ public class NotificationRolePoolResolutionTest {
     }
 
     @Test
+    @DisplayName("2.x: a pool spanning two pages is fully paginated")
     void rolePool_paginatesAcrossTwoPages_emitsOneEventPerHolder() {
+        when(config.isUserV3()).thenReturn(false);
         List<LinkedHashMap<String, Object>> p0 = new ArrayList<>();
         for (int i = 0; i < 100; i++) p0.add(userRow("lme-" + i, "7" + String.format("%08d", i)));
         List<LinkedHashMap<String, Object>> p1 = new ArrayList<>();
@@ -157,7 +171,9 @@ public class NotificationRolePoolResolutionTest {
     }
 
     @Test
+    @DisplayName("2.x: a uuid listed on two pages is notified once")
     void rolePool_duplicateUuidAcrossPages_countedOnce() {
+        when(config.isUserV3()).thenReturn(false);
         List<LinkedHashMap<String, Object>> p0 = new ArrayList<>();
         p0.add(userRow("dup", "711111111"));
         for (int i = 0; i < 99; i++) p0.add(userRow("lme-" + i, "7" + String.format("%08d", i)));
@@ -170,5 +186,25 @@ public class NotificationRolePoolResolutionTest {
 
         // 100 distinct holders on page 0; page 1's duplicate uuid is dropped -> 100 events, not 101.
         verify(producer, times(100)).push(eq(TENANT), eq(TOPIC), any());
+    }
+
+    @Test
+    @DisplayName("v3: the pool is refused, nothing is searched, and nobody is quietly notified in its place")
+    void rolePool_onV3_isRefusedRatherThanSilentlyEmpty() {
+        when(config.isUserV3()).thenReturn(true);
+        // Stubbed so the test would FAIL rather than pass by accident if the v3 branch ever fell
+        // through to the 2.x search: a full page would come back and 100 events would be pushed.
+        List<LinkedHashMap<String, Object>> p0 = new ArrayList<>();
+        for (int i = 0; i < 100; i++) p0.add(userRow("lme-" + i, "7" + String.format("%08d", i)));
+        stubTwoPages(page(p0), page(Collections.emptyList()));
+
+        notificationService.process(assignRequest(), "save-pgr-request");
+
+        // No user search of any kind was made for the pool...
+        verify(serviceRequestRepository, never()).fetchResult(any(StringBuilder.class),
+                argThat(req -> req instanceof Map && ((Map<?, ?>) req).containsKey("roleCodes")));
+        // ...and no recipient was invented in its place. An empty pool and an unresolvable pool
+        // look identical from here, which is exactly why the code refuses instead of returning [].
+        verify(producer, never()).push(eq(TENANT), eq(TOPIC), any());
     }
 }

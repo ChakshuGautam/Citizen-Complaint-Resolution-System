@@ -1079,6 +1079,27 @@ public class NotificationService {
      */
     @SuppressWarnings("unchecked")
     private List<ResolvedRecipient> resolveUsersByRole(String roleCode, String tenantId, RequestInfo ri) {
+        if (config.isUserV3())
+            // The role POOL has no DIGIT 3.0 expression at all, and this is not a mapping gap that
+            // effort closes. 2.x resolved it by paging egov-user with a roleCodes filter and a
+            // userType. v3's individual registry has NO roles field, NO role filter and NO user
+            // type; roles live in Keycloak realm roles, which is a different service with a
+            // different model and no "who holds role R in tenant T" query CCRS can reach.
+            //
+            // Refused rather than degraded, and refused HERE rather than inside the try below that
+            // logs and returns an empty list. Returning empty would mean "this role has no
+            // holders", which is the same answer as a correctly empty pool - so a whole tenant's
+            // LME notifications would stop with nothing to see anywhere. The throw is caught one
+            // frame up, per audience, so the CITIZEN and assignee rows of the same complaint are
+            // still delivered and only the pool is reported as unresolvable.
+            throw new CustomException("NOTIFICATION_ROLE_POOL_UNSUPPORTED_ON_V3",
+                    "Cannot resolve the notification pool for role '" + roleCode + "' in tenant " + tenantId
+                            + " on DIGIT 3.0. NOBODY holding that role will be notified for this complaint. The "
+                            + "individual registry has no roles field, no role filter and no user type, and roles "
+                            + "are Keycloak realm roles. Route this audience to the named assignee "
+                            + "(assigneeOnly=true on the NotificationRouting row), re-found the pool on a "
+                            + "CCRS-owned source, or keep egov.user.api.version=2.x.");
+
         String locale = config.getNotificationDefaultLocale();
         User userInfoCopy = ri.getUserInfo();
         ri.setUserInfo(getInternalMicroserviceUser(tenantId));
